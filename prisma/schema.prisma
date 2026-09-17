@@ -26,14 +26,15 @@ model Profile {
 // Foundation for Priority 3: Synthesis Telemetry & Feedback
 model SynthesisLog {
   id             String   @id @default(uuid()) @db.Uuid
-  profileId      String   @db.Uuid
+  profileId      String?  @db.Uuid
   modelUsed      String
   latencyMs      Int
   characterCount Int
   createdAt      DateTime @default(now())
 
-  profile Profile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  profile Profile? @relation(fields: [profileId], references: [id], onDelete: Cascade)
 }
+
 
 // Foundation for Persistent Terminal History
 model ChatSession {

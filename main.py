@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -22,7 +23,7 @@ from pydantic import BaseModel, Field
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
 )
-logger = logging.getLogger("unity-ai")
+logger = logging.getLogger("vuxo-infrastructure")
 
 # Load environment variables
 load_dotenv()
@@ -36,6 +37,64 @@ gemini_client: genai.Client | None = None
 GROQ_DEFAULT_MODEL = "qwen/qwen3.6-27b"
 GEMINI_DEFAULT_MODEL = "gemini-3.6-flash"
 OPENAI_DEFAULT_MODEL = "gpt-4o-mini"
+
+# In-memory Telemetry Aggregator
+telemetry_history: list[dict] = []
+
+
+async def log_synthesis_telemetry(
+    model_used: str,
+    latency_ms: int,
+    char_count: int,
+    profile_id: str | None = None,
+):
+    log_entry = {
+        "modelUsed": model_used,
+        "latencyMs": latency_ms,
+        "characterCount": char_count,
+        "profileId": profile_id,
+        "timestamp": time.time(),
+    }
+    telemetry_history.append(log_entry)
+    if len(telemetry_history) > 1000:
+        telemetry_history.pop(0)
+
+    logger.info(
+        "TELEMETRY | Model: %s | Latency: %dms | Chars: %d",
+        model_used,
+        latency_ms,
+        char_count,
+    )
+
+    supabase_url = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv(
+        "NEXT_PUBLIC_SUPABASE_ANON_KEY"
+    )
+
+    if supabase_url and supabase_key:
+        headers = {
+            "apikey": supabase_key,
+            "Authorization": f"Bearer {supabase_key}",
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal",
+        }
+        payload = {
+            "modelUsed": model_used,
+            "latencyMs": latency_ms,
+            "characterCount": char_count,
+        }
+        if profile_id:
+            payload["profileId"] = profile_id
+
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                await client.post(
+                    f"{supabase_url}/rest/v1/SynthesisLog",
+                    json=payload,
+                    headers=headers,
+                )
+        except (httpx.HTTPError, RuntimeError, ValueError) as telemetry_err:
+            logger.warning("Supabase Telemetry insert skipped: %s", telemetry_err)
 
 
 @asynccontextmanager
@@ -57,9 +116,9 @@ async def lifespan(app: FastAPI):
         gemini_client = genai.Client(api_key=gemini_key)
         logger.info("Gemini async client initialized.")
 
-    logger.info("Elite AI Backend started with non-blocking async architecture.")
+    logger.info("VUXO Infrastructure started with non-blocking async architecture.")
     yield
-    logger.info("Elite AI Backend is shutting down.")
+    logger.info("VUXO Infrastructure is shutting down.")
 
 
 # Utility: Clean <think> tags from reasoning models
@@ -117,8 +176,8 @@ class ThinkFilter:
 
 # FastAPI App
 app = FastAPI(
-    title="VUXO Infrastructure Backend",
-    description="Enterprise-grade FastAPI backend with multi-model routing, streaming, and multimodal support.",
+    title="VUXO Infrastructure",
+    description="Enterprise-grade FastAPI engine with multi-model routing, telemetry logging, streaming, and multimodal support.",
     version="2.0.0",
     lifespan=lifespan,
 )
@@ -154,6 +213,9 @@ class ChatRequest(BaseModel):
     )
     stream: bool = Field(default=False, description="Enable streaming mode")
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+    profile_id: str | None = Field(
+        default=None, description="Optional Supabase profile UUID for telemetry"
+    )
 
 
 class ChatResponse(BaseModel):
@@ -206,7 +268,6 @@ async def _invoke_gemini(
         if m.attachments:
             for att in m.attachments:
                 try:
-                    # Strip Data URI prefix if present
                     clean_data = re.sub(r"^data:image/[^;]+;base64,", "", att.data)
                     raw_bytes = base64.b64decode(clean_data)
                     parts.append(
@@ -259,7 +320,7 @@ async def _invoke_openai(
 async def root():
     return {
         "status": "Online",
-        "service": "VUXO Infrastructure Backend",
+        "service": "VUXO Infrastructure",
         "version": "2.0.0",
         "providers": {
             "groq": {
@@ -278,26 +339,52 @@ async def root():
     }
 
 
+@app.get("/telemetry")
+@app.get("/api/telemetry")
+async def get_telemetry():
+    total_requests = len(telemetry_history)
+    total_chars = sum(t["characterCount"] for t in telemetry_history)
+    avg_latency = (
+        sum(t["latencyMs"] for t in telemetry_history) // total_requests
+        if total_requests > 0
+        else 0
+    )
+
+    model_breakdown = {}
+    for t in telemetry_history:
+        m = t["modelUsed"]
+        model_breakdown[m] = model_breakdown.get(m, 0) + 1
+
+    return {
+        "status": "Active",
+        "service": "VUXO Infrastructure Telemetry",
+        "total_requests": total_requests,
+        "total_characters_processed": total_chars,
+        "average_latency_ms": avg_latency,
+        "model_breakdown": model_breakdown,
+        "recent_logs": telemetry_history[-10:],
+    }
+
+
 @app.post("/chat", response_model=ChatResponse)
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
     """
-    Main endpoint for routing requests with multimodal support and automatic failover.
+    Main endpoint for routing requests with multimodal support, automatic failover, and telemetry.
     """
+    start_time = time.time()
     provider = request.model_provider.lower()
 
-    # If any message contains attachments (images/PDFs), automatically route to Gemini
     has_attachments = any(m.attachments for m in request.messages)
     if has_attachments and provider != "gemini":
         logger.info("Attachment detected. Auto-routing to Gemini multimodal engine.")
         provider = "gemini"
 
-    # Execution with smart failover
     try:
         if provider == "groq":
             try:
                 text, model = await _invoke_groq(request.messages, request.temperature)
-                return ChatResponse(provider="Groq", response=text, model=model)
+                response_obj = ChatResponse(provider="Groq", response=text, model=model)
             except GroqError as groq_err:
                 logger.warning(
                     "Groq failed with %s. Attempting failover to Gemini...", groq_err
@@ -306,24 +393,35 @@ async def chat_endpoint(request: ChatRequest):
                     text, model = await _invoke_gemini(
                         request.messages, request.temperature
                     )
-                    return ChatResponse(
+                    response_obj = ChatResponse(
                         provider="Gemini (Failover)", response=text, model=model
                     )
-                raise
+                else:
+                    raise
 
         elif provider == "gemini":
             text, model = await _invoke_gemini(request.messages, request.temperature)
-            return ChatResponse(provider="Gemini", response=text, model=model)
+            response_obj = ChatResponse(provider="Gemini", response=text, model=model)
 
         elif provider == "openai":
             text, model = await _invoke_openai(request.messages, request.temperature)
-            return ChatResponse(provider="OpenAI", response=text, model=model)
+            response_obj = ChatResponse(provider="OpenAI", response=text, model=model)
 
         else:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Unknown provider '{provider}'. Choose 'groq', 'gemini', or 'openai'.",
             )
+
+        latency_ms = int((time.time() - start_time) * 1000)
+        char_count = len(response_obj.response)
+        await log_synthesis_telemetry(
+            model_used=response_obj.model,
+            latency_ms=latency_ms,
+            char_count=char_count,
+            profile_id=request.profile_id,
+        )
+        return response_obj
 
     except HTTPException:
         raise
@@ -343,13 +441,17 @@ async def chat_endpoint(request: ChatRequest):
 @app.post("/api/chat/stream")
 async def chat_stream_endpoint(request: ChatRequest):
     """
-    Server-Sent Events (SSE) streaming endpoint for real-time token delivery.
+    Server-Sent Events (SSE) streaming endpoint with token delivery & telemetry tracking.
     """
+    start_time = time.time()
     provider = request.model_provider.lower()
 
     async def event_generator() -> AsyncGenerator[str, None]:
+        total_tokens_chars = 0
+        used_model = GROQ_DEFAULT_MODEL
         try:
             if provider == "groq" and groq_client:
+                used_model = GROQ_DEFAULT_MODEL
                 standard_msgs = [
                     {"role": m.role, "content": m.content} for m in request.messages
                 ]
@@ -364,12 +466,15 @@ async def chat_stream_endpoint(request: ChatRequest):
                     delta = chunk.choices[0].delta.content or ""
                     filtered = think_filter.filter(delta)
                     if filtered:
+                        total_tokens_chars += len(filtered)
                         yield f"data: {json.dumps({'token': filtered, 'provider': 'Groq'})}\n\n"
                 flushed = think_filter.flush()
                 if flushed:
+                    total_tokens_chars += len(flushed)
                     yield f"data: {json.dumps({'token': flushed, 'provider': 'Groq'})}\n\n"
 
             elif provider == "gemini" and gemini_client:
+                used_model = GEMINI_DEFAULT_MODEL
                 gemini_contents = [
                     genai_types.Content(
                         role="model" if m.role == "assistant" else "user",
@@ -388,6 +493,7 @@ async def chat_stream_endpoint(request: ChatRequest):
                     try:
                         text = chunk.text
                         if text:
+                            total_tokens_chars += len(text)
                             yield f"data: {json.dumps({'token': text, 'provider': 'Gemini'})}\n\n"
                     except (ValueError, AttributeError) as gem_err:
                         logger.warning(
@@ -395,6 +501,7 @@ async def chat_stream_endpoint(request: ChatRequest):
                         )
 
             elif provider == "openai" and openai_client:
+                used_model = OPENAI_DEFAULT_MODEL
                 standard_msgs = [
                     {"role": m.role, "content": m.content} for m in request.messages
                 ]
@@ -407,6 +514,7 @@ async def chat_stream_endpoint(request: ChatRequest):
                 async for chunk in stream:
                     delta = chunk.choices[0].delta.content or ""
                     if delta:
+                        total_tokens_chars += len(delta)
                         yield f"data: {json.dumps({'token': delta, 'provider': 'OpenAI'})}\n\n"
 
             else:
@@ -421,6 +529,13 @@ async def chat_stream_endpoint(request: ChatRequest):
             logger.error("Streaming error: %s", stream_err)
             yield f"data: {json.dumps({'error': str(stream_err)})}\n\n"
 
+        latency_ms = int((time.time() - start_time) * 1000)
+        await log_synthesis_telemetry(
+            model_used=used_model,
+            latency_ms=latency_ms,
+            char_count=total_tokens_chars,
+            profile_id=request.profile_id,
+        )
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
@@ -434,14 +549,18 @@ class TTSRequest(BaseModel):
     model_id: str = Field(
         default="eleven_multilingual_v2", description="ElevenLabs Model ID"
     )
+    profile_id: str | None = Field(
+        default=None, description="Optional Supabase profile UUID for telemetry"
+    )
 
 
 @app.post("/tts")
 @app.post("/api/tts")
 async def text_to_speech_endpoint(request: TTSRequest):
     """
-    Synthesizes text into audio using ElevenLabs API.
+    Synthesizes text into audio using ElevenLabs API with telemetry logging.
     """
+    start_time = time.time()
     eleven_key = os.getenv("ELEVENLABS_API_KEY")
     if not eleven_key:
         raise HTTPException(
@@ -477,6 +596,14 @@ async def text_to_speech_endpoint(request: TTSRequest):
                     status_code=status.HTTP_502_BAD_GATEWAY,
                     detail=f"ElevenLabs API error: {resp.text}",
                 )
+
+            latency_ms = int((time.time() - start_time) * 1000)
+            await log_synthesis_telemetry(
+                model_used=request.model_id,
+                latency_ms=latency_ms,
+                char_count=len(request.text),
+                profile_id=request.profile_id,
+            )
             return Response(content=resp.content, media_type="audio/mpeg")
     except httpx.HTTPError as http_err:
         logger.error("ElevenLabs network error: %s", http_err)
