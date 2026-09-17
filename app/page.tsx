@@ -18,6 +18,8 @@ import {
   Lock,
 } from 'lucide-react';
 
+import AuthModal from '@/components/AuthModal';
+
 interface AudioSample {
   title: string;
   category: string;
@@ -57,6 +59,8 @@ export default function VuxoLandingPage() {
   const [email, setEmail] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
+  const [isAuthOpen, setIsAuthOpen] = useState(false);
+
 
   useEffect(() => {
     let interval: NodeJS.Timeout;
@@ -110,10 +114,13 @@ export default function VuxoLandingPage() {
             VUXO<span className="text-[#D4AF37]">.HQ</span>
           </span>
         </div>
-        <div className="flex items-center space-x-4">
-          <span className="hidden md:inline-block text-xs uppercase tracking-widest px-3 py-1 rounded-full bg-white/5 border border-white/10 text-[#D4AF37]">
-            Secure B2B Infrastructure
-          </span>
+        <div className="flex items-center space-x-3 sm:space-x-4">
+          <button
+            onClick={() => setIsAuthOpen(true)}
+            className="text-xs uppercase tracking-widest px-3.5 py-2 rounded border border-white/10 bg-white/5 hover:bg-white/10 text-[#D4AF37] transition-all font-semibold"
+          >
+            Operator Auth
+          </button>
           <Link
             href="/vuxo"
             className="bg-[#D4AF37] hover:bg-[#C59B27] text-black font-semibold px-5 py-2 rounded text-sm transition-all shadow-[0_0_20px_rgba(212,175,55,0.2)]"
@@ -122,6 +129,7 @@ export default function VuxoLandingPage() {
           </Link>
         </div>
       </header>
+
 
       {/* Hero Section */}
       <section className="max-w-5xl mx-auto px-6 pt-24 pb-16 text-center">
@@ -368,6 +376,10 @@ export default function VuxoLandingPage() {
       <footer className="border-t border-white/10 py-10 text-center text-neutral-500 text-xs">
         <p>© {new Date().getFullYear()} VUXO Infrastructure Corp. All rights reserved. Operating on vuxohq.tech</p>
       </footer>
+
+      {/* Supabase B2B Auth Modal */}
+      <AuthModal isOpen={isAuthOpen} onClose={() => setIsAuthOpen(false)} />
     </div>
   );
 }
+
