@@ -252,7 +252,8 @@ async def _invoke_openai(
 # --- Endpoints ---
 
 
-@app.get("/")
+@app.get("/api")
+@app.get("/api/health")
 async def root():
     return {
         "status": "Online",
@@ -273,11 +274,6 @@ async def root():
             },
         },
     }
-
-
-@app.get("/api/health")
-async def health_check():
-    return await root()
 
 
 @app.post("/api/chat", response_model=ChatResponse)
