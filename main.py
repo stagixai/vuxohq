@@ -252,6 +252,8 @@ async def _invoke_openai(
 # --- Endpoints ---
 
 
+@app.get("/")
+@app.get("/health")
 @app.get("/api")
 @app.get("/api/health")
 async def root():
@@ -276,6 +278,7 @@ async def root():
     }
 
 
+@app.post("/chat", response_model=ChatResponse)
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
     """
@@ -336,6 +339,7 @@ async def chat_endpoint(request: ChatRequest):
         ) from exc
 
 
+@app.post("/chat/stream")
 @app.post("/api/chat/stream")
 async def chat_stream_endpoint(request: ChatRequest):
     """
@@ -432,6 +436,7 @@ class TTSRequest(BaseModel):
     )
 
 
+@app.post("/tts")
 @app.post("/api/tts")
 async def text_to_speech_endpoint(request: TTSRequest):
     """
