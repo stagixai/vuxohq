@@ -1,0 +1,46 @@
+// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Profile {
+  id               String   @id @db.Uuid
+  email            String   @unique
+  fullName         String?
+  specialty        String?
+  subscriptionTier String   @default("pilot")
+  createdAt        DateTime @default(now())
+
+  // Relational Mapping
+  chatSessions  ChatSession[]
+  synthesisLogs SynthesisLog[]
+}
+
+// Foundation for Priority 3: Synthesis Telemetry & Feedback
+model SynthesisLog {
+  id             String   @id @default(uuid()) @db.Uuid
+  profileId      String   @db.Uuid
+  modelUsed      String
+  latencyMs      Int
+  characterCount Int
+  createdAt      DateTime @default(now())
+
+  profile Profile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+}
+
+// Foundation for Persistent Terminal History
+model ChatSession {
+  id        String   @id @default(uuid()) @db.Uuid
+  profileId String   @db.Uuid
+  title     String
+  createdAt DateTime @default(now())
+
+  profile Profile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+}
