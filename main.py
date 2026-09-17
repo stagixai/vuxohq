@@ -69,15 +69,60 @@ def clean_ai_response(text: str) -> str:
     return cleaned.strip()
 
 
+class ThinkFilter:
+    """
+    Streaming filter to strip <think>...</think> tags cleanly across chunk boundaries.
+    """
+
+    def __init__(self):
+        self.in_think = False
+        self.buffer = ""
+
+    def filter(self, chunk: str) -> str:
+        self.buffer += chunk
+        output = []
+        while self.buffer:
+            if not self.in_think:
+                start = self.buffer.find("<think>")
+                if start != -1:
+                    output.append(self.buffer[:start])
+                    self.in_think = True
+                    self.buffer = self.buffer[start + 7 :]
+                else:
+                    if len(self.buffer) > 6:
+                        emit_len = len(self.buffer) - 6
+                        output.append(self.buffer[:emit_len])
+                        self.buffer = self.buffer[emit_len:]
+                    break
+            else:
+                end = self.buffer.find("</think>")
+                if end != -1:
+                    self.in_think = False
+                    self.buffer = self.buffer[end + 8 :]
+                else:
+                    if len(self.buffer) > 7:
+                        self.buffer = self.buffer[-7:]
+                    break
+        return "".join(output)
+
+    def flush(self) -> str:
+        if not self.in_think:
+            res = self.buffer
+            self.buffer = ""
+            return res
+        self.buffer = ""
+        return ""
+
+
 # FastAPI App
 app = FastAPI(
     title="Unity AI - Elite Master Backend",
-    description="Enterprise-grade FastAPI backend with multi-model routing, streaming, and multimodal support for FlutterFlow.",
+    description="Enterprise-grade FastAPI backend with multi-model routing, streaming, and multimodal support.",
     version="2.0.0",
     lifespan=lifespan,
 )
 
-# Enable CORS for FlutterFlow Web, Desktop, and Mobile clients
+# Enable CORS for Web, Desktop, and Mobile clients
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -160,7 +205,9 @@ async def _invoke_gemini(
         if m.attachments:
             for att in m.attachments:
                 try:
-                    raw_bytes = base64.b64decode(att.data)
+                    # Strip Data URI prefix if present
+                    clean_data = re.sub(r"^data:image/[^;]+;base64,", "", att.data)
+                    raw_bytes = base64.b64decode(clean_data)
                     parts.append(
                         genai_types.Part.from_bytes(
                             data=raw_bytes, mime_type=att.mime_type
@@ -225,6 +272,11 @@ async def root():
             },
         },
     }
+
+
+@app.get("/api/health")
+async def health_check():
+    return await root()
 
 
 @app.post("/api/chat", response_model=ChatResponse)
@@ -306,17 +358,15 @@ async def chat_stream_endpoint(request: ChatRequest):
                     temperature=request.temperature,
                     stream=True,
                 )
-                in_think = False
+                think_filter = ThinkFilter()
                 async for chunk in stream:
                     delta = chunk.choices[0].delta.content or ""
-                    if "<think>" in delta:
-                        in_think = True
-                        continue
-                    if "</think>" in delta:
-                        in_think = False
-                        continue
-                    if not in_think and delta:
-                        yield f"data: {json.dumps({'token': delta, 'provider': 'Groq'})}\n\n"
+                    filtered = think_filter.filter(delta)
+                    if filtered:
+                        yield f"data: {json.dumps({'token': filtered, 'provider': 'Groq'})}\n\n"
+                flushed = think_filter.flush()
+                if flushed:
+                    yield f"data: {json.dumps({'token': flushed, 'provider': 'Groq'})}\n\n"
 
             elif provider == "gemini" and gemini_client:
                 gemini_contents = [
@@ -334,13 +384,39 @@ async def chat_stream_endpoint(request: ChatRequest):
                     )
                 )
                 async for chunk in response_stream:
-                    if chunk.text:
-                        yield f"data: {json.dumps({'token': chunk.text, 'provider': 'Gemini'})}\n\n"
+                    try:
+                        text = chunk.text
+                        if text:
+                            yield f"data: {json.dumps({'token': text, 'provider': 'Gemini'})}\n\n"
+                    except (ValueError, AttributeError) as gem_err:
+                        logger.warning(
+                            "Gemini chunk text extraction skipped: %s", gem_err
+                        )
+
+            elif provider == "openai" and openai_client:
+                standard_msgs = [
+                    {"role": m.role, "content": m.content} for m in request.messages
+                ]
+                stream = await openai_client.chat.completions.create(
+                    model=OPENAI_DEFAULT_MODEL,
+                    messages=standard_msgs,
+                    temperature=request.temperature,
+                    stream=True,
+                )
+                async for chunk in stream:
+                    delta = chunk.choices[0].delta.content or ""
+                    if delta:
+                        yield f"data: {json.dumps({'token': delta, 'provider': 'OpenAI'})}\n\n"
 
             else:
-                yield f"data: {json.dumps({'error': 'Provider streaming not configured'})}\n\n"
+                yield f"data: {json.dumps({'error': f'Provider {provider} not configured or active'})}\n\n"
 
-        except (GroqError, genai_errors.APIError, APIError, RuntimeError) as stream_err:
+        except (
+            GroqError,
+            genai_errors.APIError,
+            APIError,
+            RuntimeError,
+        ) as stream_err:
             logger.error("Streaming error: %s", stream_err)
             yield f"data: {json.dumps({'error': str(stream_err)})}\n\n"
 
