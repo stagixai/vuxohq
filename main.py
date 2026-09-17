@@ -6,8 +6,9 @@ import re
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
+import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from google import genai
@@ -423,3 +424,62 @@ async def chat_stream_endpoint(request: ChatRequest):
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+class TTSRequest(BaseModel):
+    text: str = Field(description="Text content to synthesize into speech")
+    voice_id: str = Field(
+        default="21m00Tcm4TlvDq8ikWAM", description="ElevenLabs Voice ID"
+    )
+    model_id: str = Field(
+        default="eleven_multilingual_v2", description="ElevenLabs Model ID"
+    )
+
+
+@app.post("/api/tts")
+async def text_to_speech_endpoint(request: TTSRequest):
+    """
+    Synthesizes text into audio using ElevenLabs API.
+    """
+    eleven_key = os.getenv("ELEVENLABS_API_KEY")
+    if not eleven_key:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="ELEVENLABS_API_KEY not configured",
+        )
+
+    if not request.text.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Text cannot be empty"
+        )
+
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{request.voice_id}"
+    headers = {
+        "Accept": "audio/mpeg",
+        "Content-Type": "application/json",
+        "xi-api-key": eleven_key,
+    }
+    payload = {
+        "text": request.text[:2500],
+        "model_id": request.model_id,
+        "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+            if resp.status_code != 200:
+                logger.error(
+                    "ElevenLabs API error [%d]: %s", resp.status_code, resp.text
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=f"ElevenLabs API error: {resp.text}",
+                )
+            return Response(content=resp.content, media_type="audio/mpeg")
+    except httpx.HTTPError as http_err:
+        logger.error("ElevenLabs network error: %s", http_err)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"ElevenLabs network error: {http_err}",
+        ) from http_err

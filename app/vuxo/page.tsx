@@ -16,13 +16,14 @@ import {
   Sliders,
   Radio,
   Trash2,
+  Volume2,
+  Loader2,
 } from 'lucide-react';
 
 interface Attachment {
   mime_type: string;
   data: string;
 }
-
 
 interface Message {
   role: 'user' | 'assistant' | 'system';
@@ -48,6 +49,10 @@ export default function VuxoTerminalPage() {
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
   const [isDictating, setIsDictating] = useState(false);
   const [attachment, setAttachment] = useState<{ name: string; data: string; mime_type: string } | null>(null);
+
+  const [synthesizingIndex, setSynthesizingIndex] = useState<number | null>(null);
+  const [playingIndex, setPlayingIndex] = useState<number | null>(null);
+  const currentAudioRef = useRef<HTMLAudioElement | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -80,6 +85,57 @@ export default function VuxoTerminalPage() {
     navigator.clipboard.writeText(text);
     setCopiedIndex(index);
     setTimeout(() => setCopiedIndex(null), 2000);
+  };
+
+  const handleSynthesizeTts = async (text: string, index: number) => {
+    if (currentAudioRef.current) {
+      currentAudioRef.current.pause();
+      currentAudioRef.current = null;
+    }
+
+    if (playingIndex === index) {
+      setPlayingIndex(null);
+      return;
+    }
+
+    setSynthesizingIndex(index);
+    try {
+      const response = await fetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ detail: 'TTS Synthesis failed' }));
+        throw new Error(errorData.detail || `HTTP ${response.status}`);
+      }
+
+      const audioBlob = await response.blob();
+      const audioUrl = URL.createObjectURL(audioBlob);
+      const audio = new Audio(audioUrl);
+      currentAudioRef.current = audio;
+
+      setSynthesizingIndex(null);
+      setPlayingIndex(index);
+
+      audio.onended = () => {
+        setPlayingIndex(null);
+        currentAudioRef.current = null;
+      };
+
+      audio.onerror = () => {
+        setPlayingIndex(null);
+        currentAudioRef.current = null;
+        alert('Failed to play audio stream.');
+      };
+
+      await audio.play();
+    } catch (err) {
+      setSynthesizingIndex(null);
+      setPlayingIndex(null);
+      alert(`ElevenLabs TTS Error: ${err instanceof Error ? err.message : 'Synthesis failed'}`);
+    }
   };
 
   const toggleDictation = () => {
@@ -132,7 +188,6 @@ export default function VuxoTerminalPage() {
 
     try {
       if (isStreaming) {
-        // Streaming mode via SSE endpoint
         const response = await fetch('/api/chat/stream', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -196,7 +251,6 @@ export default function VuxoTerminalPage() {
           }
         }
       } else {
-        // Standard REST endpoint
         const response = await fetch('/api/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -264,10 +318,14 @@ export default function VuxoTerminalPage() {
             </div>
             <div>
               <div className="flex items-center space-x-2">
-                <span className="font-bold tracking-widest text-lg text-white">VUXO<span className="text-[#D4AF37]">.TERMINAL</span></span>
+                <span className="font-bold tracking-widest text-lg text-white">
+                  VUXO<span className="text-[#D4AF37]">.TERMINAL</span>
+                </span>
                 <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
               </div>
-              <p className="text-[10px] text-neutral-500 tracking-wider uppercase">Enterprise Voice & Synthesis Gateway</p>
+              <p className="text-[10px] text-neutral-500 tracking-wider uppercase">
+                Enterprise Voice & Synthesis Gateway
+              </p>
             </div>
           </div>
         </div>
@@ -317,7 +375,7 @@ export default function VuxoTerminalPage() {
         </div>
       </header>
 
-      {/* Control Bar (Mobile provider selection & stream settings) */}
+      {/* Control Bar */}
       <div className="bg-neutral-950 border-b border-white/5 px-6 py-2 flex flex-wrap items-center justify-between text-xs text-neutral-400 gap-3">
         <div className="flex items-center space-x-4">
           <div className="flex items-center space-x-1.5">
@@ -375,7 +433,7 @@ export default function VuxoTerminalPage() {
             </div>
 
             <div
-              className={`relative max-w-2xl rounded-xl p-5 border text-sm leading-relaxed shadow-lg ${
+              className={`relative max-w-2xl rounded-xl p-5 border text-sm leading-relaxed shadow-lg pb-10 ${
                 msg.role === 'user'
                   ? 'bg-[#D4AF37]/10 border-[#D4AF37]/30 text-white rounded-tr-none'
                   : 'bg-neutral-900/80 border-white/10 text-neutral-200 rounded-tl-none'
@@ -390,18 +448,48 @@ export default function VuxoTerminalPage() {
 
               <p className="whitespace-pre-wrap">{msg.content}</p>
 
-              {msg.role === 'assistant' && (
-                <button
-                  onClick={() => handleCopy(msg.content, idx)}
-                  className="absolute bottom-3 right-3 p-1.5 rounded bg-black/40 hover:bg-black/80 text-neutral-400 hover:text-white transition-all border border-white/5"
-                  title="Copy to clipboard"
-                >
-                  {copiedIndex === idx ? (
-                    <Check className="w-3.5 h-3.5 text-emerald-400" />
-                  ) : (
-                    <Copy className="w-3.5 h-3.5" />
-                  )}
-                </button>
+              {msg.role === 'assistant' && msg.content && (
+                <div className="absolute bottom-3 right-3 flex items-center space-x-2">
+                  <button
+                    onClick={() => handleSynthesizeTts(msg.content, idx)}
+                    disabled={synthesizingIndex === idx}
+                    className={`flex items-center space-x-1.5 px-2 py-1 rounded text-xs transition-all border ${
+                      playingIndex === idx
+                        ? 'bg-[#D4AF37] text-black border-[#D4AF37] font-bold shadow-[0_0_10px_rgba(212,175,55,0.4)]'
+                        : 'bg-black/40 hover:bg-black/80 text-[#D4AF37] hover:text-white border-white/10'
+                    }`}
+                    title="Synthesize Voice Audio via ElevenLabs"
+                  >
+                    {synthesizingIndex === idx ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin text-[#D4AF37]" />
+                        <span className="text-[10px]">Synthesizing...</span>
+                      </>
+                    ) : playingIndex === idx ? (
+                      <>
+                        <Volume2 className="w-3.5 h-3.5 animate-pulse" />
+                        <span className="text-[10px]">Playing Audio</span>
+                      </>
+                    ) : (
+                      <>
+                        <Volume2 className="w-3.5 h-3.5" />
+                        <span className="text-[10px] hidden sm:inline">ElevenLabs Voice</span>
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    onClick={() => handleCopy(msg.content, idx)}
+                    className="p-1.5 rounded bg-black/40 hover:bg-black/80 text-neutral-400 hover:text-white transition-all border border-white/5"
+                    title="Copy to clipboard"
+                  >
+                    {copiedIndex === idx ? (
+                      <Check className="w-3.5 h-3.5 text-emerald-400" />
+                    ) : (
+                      <Copy className="w-3.5 h-3.5" />
+                    )}
+                  </button>
+                </div>
               )}
             </div>
           </div>
