@@ -117,7 +117,7 @@ class ThinkFilter:
 
 # FastAPI App
 app = FastAPI(
-    title="Unity AI - Elite Master Backend",
+    title="VUXO Infrastructure Backend",
     description="Enterprise-grade FastAPI backend with multi-model routing, streaming, and multimodal support.",
     version="2.0.0",
     lifespan=lifespan,
@@ -256,7 +256,7 @@ async def _invoke_openai(
 async def root():
     return {
         "status": "Online",
-        "service": "Unity AI Elite Master Backend",
+        "service": "VUXO Infrastructure Backend",
         "version": "2.0.0",
         "providers": {
             "groq": {
