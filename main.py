@@ -605,9 +605,16 @@ async def transcribe_audio(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Audio payload too short"
         )
 
-    # Validate WebM container magic bytes (\x1a\x45\xdf\xa3)
-    if audio_bytes[:4] != b"\x1a\x45\xdf\xa3" and audio_bytes[:4] != b"RIFF":
-        logger.info("Audio format header: %s", audio_bytes[:4])
+    # Validate WebM/Opus container magic bytes (\x1a\x45\xdf\xa3), RIFF (WAV), or OggS (Ogg/Opus)
+    if (
+        audio_bytes[:4] != b"\x1a\x45\xdf\xa3"
+        and audio_bytes[:4] != b"RIFF"
+        and audio_bytes[:4] != b"OggS"
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unsupported audio format. Expected WebM/Opus.",
+        )
 
     audio_duration_seconds = round(len(audio_bytes) / 2000.0, 2)
 
