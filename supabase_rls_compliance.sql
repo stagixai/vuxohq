@@ -32,13 +32,30 @@ CREATE POLICY "System can insert synthesis logs"
 ON "SynthesisLog" FOR INSERT 
 WITH CHECK (true); -- Allow backend service role to insert
 
--- 4. Create a Soft-Delete Retention Policy (Auto-archive after 90 days)
+-- 4. Create a Soft-Delete Retention Policy (Auto-- Compliance soft-deletion function
 CREATE OR REPLACE FUNCTION soft_delete_old_logs()
 RETURNS void AS $$
 BEGIN
-  UPDATE "SynthesisLog"
-  SET deleted_at = NOW()
-  WHERE created_at < NOW() - INTERVAL '90 days'
-  AND deleted_at IS NULL;
+    UPDATE "SynthesisLog"
+    SET deleted_at = NOW()
+    WHERE created_at < NOW() - INTERVAL '90 days'
+      AND deleted_at IS NULL;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Pillar 3: Beta User Onboarding & Waitlist Schema
+CREATE TABLE IF NOT EXISTS "Waitlist" (
+  id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+  email TEXT UNIQUE NOT NULL,
+  status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  invited_at TIMESTAMP WITH TIME ZONE
+);
+
+ALTER TABLE "Waitlist" ENABLE ROW LEVEL SECURITY;
+
+-- Allow anyone (public/authenticated) to join waitlist
+CREATE POLICY "Anyone can join waitlist" ON "Waitlist" FOR INSERT WITH CHECK (true);
+
+-- Allow users to read their own waitlist status by email
+CREATE POLICY "Users can read own waitlist status" ON "Waitlist" FOR SELECT USING (auth.email() = email);

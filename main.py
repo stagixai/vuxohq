@@ -10,7 +10,16 @@ from contextlib import asynccontextmanager
 import httpx
 import jwt
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi import (
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Request,
+    Response,
+    status,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from google import genai
@@ -28,6 +37,27 @@ logger = logging.getLogger("vuxo-infrastructure")
 
 # Load environment variables
 load_dotenv()
+
+# Initialize Sentry Observability & Error Tracking
+sentry_dsn = os.getenv("SENTRY_DSN")
+if sentry_dsn:
+    try:
+        import sentry_sdk
+        from sentry_sdk.integrations.fastapi import FastApiIntegration
+        from sentry_sdk.integrations.starlette import StarletteIntegration
+
+        sentry_sdk.init(
+            dsn=sentry_dsn,
+            integrations=[
+                StarletteIntegration(transaction_style="url"),
+                FastApiIntegration(transaction_style="url"),
+            ],
+            traces_sample_rate=0.1,
+            environment=os.getenv("VERCEL_ENV", "development"),
+        )
+        logger.info("Sentry SDK initialized successfully.")
+    except Exception as s_err:
+        logger.warning("Sentry SDK initialization skipped: %s", s_err)
 
 # Global AI Clients
 groq_client: AsyncGroq | None = None
@@ -501,14 +531,42 @@ async def get_telemetry():
     }
 
 
+async def send_webhook_export(webhook_url: str, payload: dict):
+    """
+    Fire and forget async webhook export delivery to user-configured EHR/CRM endpoints.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.post(
+                webhook_url,
+                json=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-VUXO-Signature": "vuxo-secure-v1",
+                },
+            )
+        logger.info("Async webhook export delivered to %s", webhook_url)
+    except Exception as exc:
+        logger.warning("Async webhook export delivery failed: %s", exc)
+        sentry_dsn = os.getenv("SENTRY_DSN")
+        if sentry_dsn:
+            try:
+                import sentry_sdk
+
+                sentry_sdk.capture_exception(exc)
+            except Exception:
+                pass
+
+
 @app.post("/transcribe")
 @app.post("/api/transcribe")
 async def transcribe_audio(
     request: TranscribeRequest,
+    background_tasks: BackgroundTasks,
     auth_data: tuple[str, str | None] = Depends(rate_limit_dependency),
 ):
     """
-    Transcribes base64 audio payload using Groq Whisper API (whisper-large-v3-turbo) with rate limiting and JWT validation.
+    Transcribes base64 audio payload using Groq Whisper API (whisper-large-v3-turbo) with rate limiting, JWT validation, and async webhook export.
     """
     profile_id, user_jwt = auth_data
     start_time = time.time()
@@ -541,6 +599,18 @@ async def transcribe_audio(
             profile_id=profile_id,
             user_jwt=user_jwt,
         )
+
+        # Trigger async webhook export if webhook URL is configured
+        user_webhook = os.getenv("EHR_INTAKE_WEBHOOK_URL")
+        if user_webhook:
+            webhook_payload = {
+                "profile_id": profile_id,
+                "timestamp": time.time(),
+                "transcript": text,
+                "model": "groq/whisper-large-v3-turbo",
+            }
+            background_tasks.add_task(send_webhook_export, user_webhook, webhook_payload)
+
         return {
             "text": text,
             "model": "whisper-large-v3-turbo",

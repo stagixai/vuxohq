@@ -9,3 +9,4 @@ httpx>=0.28.0
 python-multipart>=0.0.9
 upstash-redis>=1.0.0
 PyJWT[crypto]>=2.9.0
+sentry-sdk[fastapi]>=2.0.0

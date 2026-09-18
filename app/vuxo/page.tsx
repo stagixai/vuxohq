@@ -123,6 +123,13 @@ export default function VuxoTerminalPage() {
   const [userProfile, setUserProfile] = useState<{ id: string; email: string; full_name?: string } | null>(null);
   const [accessToken, setAccessToken] = useState<string | null>(null);
 
+  const [voices, setVoices] = useState<Array<{ voice_id: string; name: string; category?: string }>>([
+    { voice_id: '21m00Tcm4TlvDq8ikWAM', name: 'Rachel (Default)', category: 'premade' },
+    { voice_id: 'AZnzlk1XvdvUeBnXmlld', name: 'Domi', category: 'premade' },
+    { voice_id: 'EXAVITQu4vr4xnSDxMaL', name: 'Bella', category: 'premade' },
+  ]);
+  const [selectedVoiceId, setSelectedVoiceId] = useState<string>('21m00Tcm4TlvDq8ikWAM');
+
   const [synthesizingIndex, setSynthesizingIndex] = useState<number | null>(null);
   const [playingIndex, setPlayingIndex] = useState<number | null>(null);
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -137,6 +144,15 @@ export default function VuxoTerminalPage() {
 
   useEffect(() => {
     streamingAudioPlayerRef.current = new StreamingAudioPlayer();
+
+    fetch('/api/voices')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.voices && Array.isArray(data.voices) && data.voices.length > 0) {
+          setVoices(data.voices);
+        }
+      })
+      .catch((err) => console.log('Voices fetch fallback active:', err));
 
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (session?.user) {
@@ -228,6 +244,7 @@ export default function VuxoTerminalPage() {
         headers: getAuthHeaders(),
         body: JSON.stringify({
           text,
+          voice_id: selectedVoiceId,
           profile_id: userProfile?.id,
         }),
       });
@@ -627,6 +644,22 @@ export default function VuxoTerminalPage() {
             <Radio className="w-3.5 h-3.5" />
             <span>Stream: {isStreaming ? 'ON' : 'OFF'}</span>
           </button>
+
+          <div className="flex items-center space-x-1.5">
+            <Volume2 className="w-3.5 h-3.5 text-[#D4AF37]" />
+            <select
+              value={selectedVoiceId}
+              onChange={(e) => setSelectedVoiceId(e.target.value)}
+              className="bg-neutral-900 border border-white/10 text-white text-xs rounded px-2 py-1 focus:outline-none focus:border-[#D4AF37]"
+              title="Select ElevenLabs Voice"
+            >
+              {voices.map((v) => (
+                <option key={v.voice_id} value={v.voice_id}>
+                  {v.name} {v.category ? `(${v.category})` : ''}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
 
         <div className="md:hidden flex items-center space-x-2">
