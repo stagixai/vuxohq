@@ -55,6 +55,11 @@ export default function ContentStudioPage() {
   const [approvalStatus, setApprovalStatus] = useState<'idle' | 'approved' | 'rejected'>('idle');
   const [copiedSection, setCopiedSection] = useState<'gbp' | 'linkedin' | null>(null);
   const [publishStatus, setPublishStatus] = useState<string | null>(null);
+  
+  // UX-3 Notification Preferences
+  const [emailNotifs, setEmailNotifs] = useState(true);
+  const [smsNotifs, setSmsNotifs] = useState(false);
+  const [isSavingPrefs, setIsSavingPrefs] = useState(false);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -232,6 +237,44 @@ export default function ContentStudioPage() {
     }
   };
 
+  const handleSavePrefs = async (email: boolean, sms: boolean) => {
+    setIsSavingPrefs(true);
+    try {
+      await fetch('/api/user/preferences', {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({
+          email_notifications: email,
+          sms_notifications: sms,
+        }),
+      });
+    } catch (err) {
+      console.error('Save prefs error:', err);
+    } finally {
+      setIsSavingPrefs(false);
+    }
+  };
+
+  const handleBulkApprove = async () => {
+    if (!contentSuite) return;
+    try {
+      const response = await fetch('/api/content/approve-bulk', {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({
+          post_ids: [contentSuite.post_id],
+          approved: true,
+          feedback: 'Bulk approved via Studio UI',
+        }),
+      });
+      if (response.ok) {
+        setApprovalStatus('approved');
+      }
+    } catch (err) {
+      console.error('Bulk Approve Error:', err);
+    }
+  };
+
   const handleCopy = (text: string, section: 'gbp' | 'linkedin') => {
     navigator.clipboard.writeText(text);
     setCopiedSection(section);
@@ -327,6 +370,43 @@ export default function ContentStudioPage() {
                   placeholder="e.g. La Jolla, CA"
                   className="w-full bg-neutral-950 border border-white/10 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-[#D4AF37]"
                 />
+              </div>
+
+              {/* UX-3: Notification Preferences Settings */}
+              <div className="pt-2 border-t border-white/10 space-y-2">
+                <span className="text-[11px] font-semibold text-neutral-400 uppercase tracking-wider block">
+                  Notification Dispatch Alerts
+                </span>
+                <div className="flex items-center justify-between text-xs text-neutral-300">
+                  <span>SendGrid Email Alerts</span>
+                  <input
+                    type="checkbox"
+                    checked={emailNotifs}
+                    onChange={(e) => {
+                      setEmailNotifs(e.target.checked);
+                      handleSavePrefs(e.target.checked, smsNotifs);
+                    }}
+                    className="accent-[#D4AF37] h-4 w-4 rounded cursor-pointer"
+                  />
+                </div>
+                <div className="flex items-center justify-between text-xs text-neutral-300">
+                  <span>Twilio SMS SMS Alerts</span>
+                  <input
+                    type="checkbox"
+                    checked={smsNotifs}
+                    onChange={(e) => {
+                      setSmsNotifs(e.target.checked);
+                      handleSavePrefs(emailNotifs, e.target.checked);
+                    }}
+                    className="accent-[#D4AF37] h-4 w-4 rounded cursor-pointer"
+                  />
+                </div>
+              </div>
+
+              {/* COMPLIANCE-2: Mandatory AI Disclosure Badge */}
+              <div className="p-2.5 bg-neutral-950 border border-[#D4AF37]/30 rounded-lg text-[10px] text-neutral-400 flex items-center space-x-2">
+                <Sparkles className="w-3.5 h-3.5 text-[#D4AF37] shrink-0" />
+                <span>AI Disclosure: Content synthesized via VUXO Gemini 3.6 Flash Engine. Human approval required prior to publishing.</span>
               </div>
 
               {/* Dictation Controller Button */}

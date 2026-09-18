@@ -104,3 +104,74 @@ CREATE POLICY "Users can insert own content posts" ON "ContentPost" FOR INSERT W
 DROP POLICY IF EXISTS "Users can update own content posts" ON "ContentPost";
 CREATE POLICY "Users can update own content posts" ON "ContentPost" FOR UPDATE USING (auth.uid() = profile_id);
 
+-- Pillar 5: Master Remediation Engine Schemas & RPCs
+CREATE TABLE IF NOT EXISTS "VoiceProfile" (
+  id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+  profile_id UUID NOT NULL,
+  audio_url TEXT NOT NULL,
+  duration_seconds NUMERIC(10,2) NOT NULL,
+  status TEXT DEFAULT 'training' CHECK (status IN ('training', 'ready', 'failed')),
+  embeddings JSONB,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+ALTER TABLE "VoiceProfile" ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Users can manage own voice profile" ON "VoiceProfile";
+CREATE POLICY "Users can manage own voice profile" ON "VoiceProfile" FOR ALL USING (auth.uid() = profile_id);
+
+CREATE TABLE IF NOT EXISTS "PostComment" (
+  id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+  post_id UUID NOT NULL REFERENCES "ContentPost"(id) ON DELETE CASCADE,
+  profile_id UUID NOT NULL,
+  comment_hash TEXT NOT NULL,
+  comment_text TEXT NOT NULL,
+  ai_reply TEXT,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+ALTER TABLE "PostComment" ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Users can manage own post comments" ON "PostComment";
+CREATE POLICY "Users can manage own post comments" ON "PostComment" FOR ALL USING (auth.uid() = profile_id);
+
+-- SEC-3: Atomic Database Transaction for Post Approval
+CREATE OR REPLACE FUNCTION approve_content_post_tx(
+  p_post_id UUID,
+  p_profile_id UUID,
+  p_status TEXT,
+  p_feedback TEXT DEFAULT NULL
+)
+RETURNS json AS $$
+DECLARE
+  updated_post json;
+BEGIN
+  UPDATE "ContentPost"
+  SET status = p_status,
+      feedback = p_feedback
+  WHERE id = p_post_id
+    AND profile_id = p_profile_id
+  RETURNING json_build_object('id', id, 'status', status, 'feedback', feedback) INTO updated_post;
+
+  IF updated_post IS NULL THEN
+    RAISE EXCEPTION 'Post not found or user lacks permission to modify post %', p_post_id;
+  END IF;
+
+  RETURN updated_post;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- COMPLIANCE-1: Automated Data Retention Cleanup Procedure
+CREATE OR REPLACE FUNCTION cleanup_expired_content_posts()
+RETURNS integer AS $$
+DECLARE
+  deleted_count integer;
+BEGIN
+  DELETE FROM "ContentPost"
+  WHERE status = 'rejected'
+    AND created_at < NOW() - INTERVAL '30 days';
+  
+  GET DIAGNOSTICS deleted_count = ROW_COUNT;
+  RETURN deleted_count;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+
