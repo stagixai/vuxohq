@@ -173,5 +173,29 @@ BEGIN
   RETURN deleted_count;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
+-- Update: VoiceProfile table columns for post ownership validation and notifications
+ALTER TABLE "VoiceProfile"
+ADD COLUMN IF NOT EXISTS linkedin_profile_url TEXT,
+ADD COLUMN IF NOT EXISTS notification_email TEXT;
 
+-- Create: CommentDraft table for reply automation and approval workflow
+CREATE TABLE IF NOT EXISTS "CommentDraft" (
+  id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+  profile_id UUID NOT NULL,
+  platform TEXT DEFAULT 'linkedin',
+  post_id TEXT,
+  post_url TEXT,
+  commenter_name TEXT,
+  original_comment TEXT NOT NULL,
+  comment_sentiment TEXT,
+  strategy TEXT,
+  reply_draft TEXT NOT NULL,
+  alternative_replies JSONB,
+  status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'edited', 'rejected')),
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
 
+ALTER TABLE "CommentDraft" ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Users can manage own comment drafts" ON "CommentDraft";
+CREATE POLICY "Users can manage own comment drafts" ON "CommentDraft" FOR ALL USING (auth.uid() = profile_id);
