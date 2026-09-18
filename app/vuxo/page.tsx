@@ -168,26 +168,35 @@ export default function VuxoTerminalPage() {
 
           setIsTranscribing(true);
           try {
-            const formData = new FormData();
-            formData.append('file', audioBlob, 'dictation.webm');
+            const reader = new FileReader();
+            reader.onloadend = async () => {
+              const base64Data = (reader.result as string).split(',')[1];
+              try {
+                const res = await fetch('/api/transcribe', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ audio_base64: base64Data, filename: 'dictation.webm' }),
+                });
 
-            const res = await fetch('/api/transcribe', {
-              method: 'POST',
-              body: formData,
-            });
+                if (!res.ok) {
+                  const errJson = await res.json().catch(() => ({ detail: 'Transcription failed' }));
+                  throw new Error(errJson.detail || `HTTP ${res.status}`);
+                }
 
-            if (!res.ok) {
-              const errJson = await res.json().catch(() => ({ detail: 'Transcription failed' }));
-              throw new Error(errJson.detail || `HTTP ${res.status}`);
-            }
-
-            const data = await res.json();
-            if (data.text) {
-              setInput((prev) => (prev ? `${prev} ${data.text}` : data.text));
-            }
+                const data = await res.json();
+                if (data.text) {
+                  setInput((prev) => (prev ? `${prev} ${data.text}` : data.text));
+                }
+              } catch (err) {
+                alert(`Groq Whisper Dictation Error: ${err instanceof Error ? err.message : 'Transcription failed'}`);
+              } finally {
+                setIsTranscribing(false);
+                setIsDictating(false);
+              }
+            };
+            reader.readAsDataURL(audioBlob);
           } catch (err) {
-            alert(`Groq Whisper Dictation Error: ${err instanceof Error ? err.message : 'Transcription failed'}`);
-          } finally {
+            alert(`Audio processing error: ${err instanceof Error ? err.message : 'Failed'}`);
             setIsTranscribing(false);
             setIsDictating(false);
           }

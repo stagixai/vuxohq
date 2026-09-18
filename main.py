@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Header, HTTPException, Response, UploadFile, status
+from fastapi import FastAPI, Header, HTTPException, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from google import genai
@@ -249,6 +249,11 @@ class ChatResponse(BaseModel):
     model: str
 
 
+class TranscribeRequest(BaseModel):
+    audio_base64: str = Field(description="Base64 encoded audio bytes")
+    filename: str = Field(default="dictation.webm", description="Optional filename")
+
+
 # --- Core Provider Invocation Handlers ---
 
 
@@ -393,9 +398,9 @@ async def get_telemetry():
 
 @app.post("/transcribe")
 @app.post("/api/transcribe")
-async def transcribe_audio(file: UploadFile = File(...)):
+async def transcribe_audio(request: TranscribeRequest):
     """
-    Transcribes audio using Groq Whisper API (whisper-large-v3-turbo).
+    Transcribes base64 audio payload using Groq Whisper API (whisper-large-v3-turbo).
     """
     if not groq_client:
         raise HTTPException(
@@ -404,12 +409,12 @@ async def transcribe_audio(file: UploadFile = File(...)):
         )
 
     try:
-        audio_bytes = await file.read()
-        filename = file.filename or "speech.webm"
-        content_type = file.content_type or "audio/webm"
+        clean_b64 = re.sub(r"^data:audio/[^;]+;base64,", "", request.audio_base64)
+        audio_bytes = base64.b64decode(clean_b64)
+        filename = request.filename or "dictation.webm"
 
         transcription = await groq_client.audio.transcriptions.create(
-            file=(filename, audio_bytes, content_type),
+            file=(filename, audio_bytes, "audio/webm"),
             model="whisper-large-v3-turbo",
             response_format="json",
         )
