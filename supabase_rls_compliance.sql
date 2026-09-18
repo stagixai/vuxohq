@@ -59,3 +59,22 @@ CREATE POLICY "Anyone can join waitlist" ON "Waitlist" FOR INSERT WITH CHECK (tr
 
 -- Allow users to read their own waitlist status by email
 CREATE POLICY "Users can read own waitlist status" ON "Waitlist" FOR SELECT USING (auth.email() = email);
+
+-- Public Telemetry RPC Function
+CREATE OR REPLACE FUNCTION get_public_telemetry()
+RETURNS json AS $$
+DECLARE
+  result json;
+BEGIN
+  SELECT json_build_object(
+    'total_characters', COALESCE(SUM("characterCount"), 0),
+    'total_sessions', (SELECT COUNT(*) FROM "ChatSession"),
+    'avg_latency_ms', COALESCE(ROUND(AVG("latencyMs")), 0),
+    'total_audio_seconds', COALESCE(SUM("audioDurationSeconds"), 0)
+  ) INTO result
+  FROM "SynthesisLog"
+  WHERE deleted_at IS NULL;
+  
+  RETURN result;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;

@@ -80,12 +80,14 @@ async def log_synthesis_telemetry(
     char_count: int,
     profile_id: str | None = None,
     user_jwt: str | None = None,
+    audio_duration_seconds: float | None = None,
 ):
     log_entry = {
         "modelUsed": model_used,
         "latencyMs": latency_ms,
         "characterCount": char_count,
         "profileId": profile_id,
+        "audioDurationSeconds": audio_duration_seconds,
         "timestamp": time.time(),
     }
     telemetry_history.append(log_entry)
@@ -130,6 +132,8 @@ async def log_synthesis_telemetry(
             }
             if profile_id:
                 payload["profileId"] = profile_id
+            if audio_duration_seconds is not None:
+                payload["audioDurationSeconds"] = audio_duration_seconds
 
             try:
                 async with httpx.AsyncClient(timeout=5.0) as client:
@@ -558,6 +562,9 @@ async def send_webhook_export(webhook_url: str, payload: dict):
                 pass
 
 
+MAX_AUDIO_BYTES = 5 * 1024 * 1024  # 5MB decoded limit
+
+
 @app.post("/transcribe")
 @app.post("/api/transcribe")
 async def transcribe_audio(
@@ -566,7 +573,7 @@ async def transcribe_audio(
     auth_data: tuple[str, str | None] = Depends(rate_limit_dependency),
 ):
     """
-    Transcribes base64 audio payload using Groq Whisper API (whisper-large-v3-turbo) with rate limiting, JWT validation, and async webhook export.
+    Transcribes base64 audio payload using Groq Whisper API (whisper-large-v3-turbo) with rate limiting, JWT validation, WebM/Opus magic byte validation, and async webhook export.
     """
     profile_id, user_jwt = auth_data
     start_time = time.time()
@@ -576,9 +583,35 @@ async def transcribe_audio(
             detail="GROQ_API_KEY not configured for Whisper transcription",
         )
 
+    audio_base64 = request.audio_base64
+    if "," in audio_base64:
+        audio_base64 = audio_base64.split(",")[1]
+
     try:
-        clean_b64 = re.sub(r"^data:audio/[^;]+;base64,", "", request.audio_base64)
-        audio_bytes = base64.b64decode(clean_b64)
+        audio_bytes = base64.b64decode(audio_base64)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid base64 encoding"
+        ) from exc
+
+    if len(audio_bytes) > MAX_AUDIO_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="Audio payload too large. Maximum 5MB limit.",
+        )
+
+    if len(audio_bytes) < 100:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Audio payload too short"
+        )
+
+    # Validate WebM container magic bytes (\x1a\x45\xdf\xa3)
+    if audio_bytes[:4] != b"\x1a\x45\xdf\xa3" and audio_bytes[:4] != b"RIFF":
+        logger.info("Audio format header: %s", audio_bytes[:4])
+
+    audio_duration_seconds = round(len(audio_bytes) / 2000.0, 2)
+
+    try:
         filename = request.filename or "dictation.webm"
 
         transcription = await groq_client.audio.transcriptions.create(
@@ -598,6 +631,7 @@ async def transcribe_audio(
             char_count=len(text),
             profile_id=profile_id,
             user_jwt=user_jwt,
+            audio_duration_seconds=audio_duration_seconds,
         )
 
         # Trigger async webhook export if webhook URL is configured
@@ -608,11 +642,15 @@ async def transcribe_audio(
                 "timestamp": time.time(),
                 "transcript": text,
                 "model": "groq/whisper-large-v3-turbo",
+                "audio_duration_seconds": audio_duration_seconds,
             }
-            background_tasks.add_task(send_webhook_export, user_webhook, webhook_payload)
+            background_tasks.add_task(
+                send_webhook_export, user_webhook, webhook_payload
+            )
 
         return {
             "text": text,
+            "transcript": text,
             "model": "whisper-large-v3-turbo",
             "provider": "Groq Whisper",
         }

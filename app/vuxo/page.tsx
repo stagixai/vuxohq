@@ -281,7 +281,7 @@ export default function VuxoTerminalPage() {
     }
   };
 
-  // Groq Whisper Microphone Dictation Pipeline
+  // Groq Whisper Microphone Dictation Pipeline (Opus 16kbps Compression)
   const toggleDictation = async () => {
     if (!isDictating) {
       try {
@@ -294,7 +294,15 @@ export default function VuxoTerminalPage() {
           },
         });
         audioChunksRef.current = [];
-        const mediaRecorder = new MediaRecorder(stream);
+
+        const mimeType = typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+          ? 'audio/webm;codecs=opus'
+          : 'audio/webm';
+
+        const mediaRecorder = new MediaRecorder(stream, {
+          mimeType,
+          audioBitsPerSecond: 16000, // 16kbps Opus compression (~95% size reduction)
+        });
         mediaRecorderRef.current = mediaRecorder;
 
         mediaRecorder.ondataavailable = (event) => {
@@ -309,7 +317,7 @@ export default function VuxoTerminalPage() {
             recordingTimeoutRef.current = null;
           }
           stream.getTracks().forEach((track) => track.stop());
-          const audioBlob = new Blob(audioChunksRef.current, { type: mediaRecorder.mimeType || 'audio/webm' });
+          const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
           if (audioBlob.size === 0) {
             setIsDictating(false);
             return;
@@ -337,8 +345,9 @@ export default function VuxoTerminalPage() {
                 }
 
                 const data = await res.json();
-                if (data.text) {
-                  setInput((prev) => (prev ? `${prev} ${data.text}` : data.text));
+                const textResult = data.transcript || data.text;
+                if (textResult) {
+                  setInput((prev) => (prev ? `${prev} ${textResult}` : textResult));
                 }
               } catch (err) {
                 alert(`Groq Whisper Dictation Error: ${err instanceof Error ? err.message : 'Transcription failed'}`);
@@ -358,7 +367,7 @@ export default function VuxoTerminalPage() {
         mediaRecorder.start(250);
         setIsDictating(true);
 
-        // Auto-stop recording at 30s to prevent Vercel Serverless 4.5MB payload limit
+        // Auto-stop recording at 30s to prevent Vercel Serverless payload limit
         recordingTimeoutRef.current = setTimeout(() => {
           if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
             mediaRecorderRef.current.stop();
