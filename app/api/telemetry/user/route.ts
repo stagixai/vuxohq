@@ -1,45 +1,54 @@
+import { createClient } from '@supabase/supabase-js';
 import { NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabaseClient';
 
-export async function GET(request: Request) {
-  const { searchParams } = new URL(request.url);
-  const profileId = searchParams.get('profile_id') || request.headers.get('x-profile-id');
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+);
 
-  if (!profileId) {
-    return NextResponse.json({ error: 'Missing profile_id parameter' }, { status: 400 });
+export async function GET(req: Request) {
+  const authHeader = req.headers.get('authorization');
+  if (!authHeader) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  const token = authHeader.replace('Bearer ', '');
+
+  // Verify user
+  const {
+    data: { user },
+    error: userError,
+  } = await supabase.auth.getUser(token);
+  if (userError || !user) return NextResponse.json({ error: 'Invalid token' }, { status: 401 });
+
+  // Fetch Recent Chat Sessions
+  const { data: sessions, error: sessionError } = await supabase
+    .from('ChatSession')
+    .select('id, title, createdAt')
+    .eq('profileId', user.id)
+    .order('createdAt', { ascending: false })
+    .limit(10);
+
+  // Fetch Aggregated Telemetry
+  const { data: telemetry, error: telemetryError } = await supabase
+    .from('SynthesisLog')
+    .select('latencyMs, characterCount, modelUsed')
+    .eq('profileId', user.id);
+
+  if (sessionError || telemetryError) {
+    return NextResponse.json({ error: 'Failed to fetch telemetry' }, { status: 500 });
   }
 
-  try {
-    const { data, error } = await supabase
-      .from('SynthesisLog')
-      .select('*')
-      .eq('profileId', profileId)
-      .order('createdAt', { ascending: false })
-      .limit(50);
+  const totalChars = telemetry?.reduce((acc, curr) => acc + (curr.characterCount || 0), 0) || 0;
+  const avgLatency = telemetry?.length
+    ? Math.round(telemetry.reduce((acc, curr) => acc + (curr.latencyMs || 0), 0) / telemetry.length)
+    : 0;
 
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
-    }
-
-    const totalRequests = data.length;
-    const totalChars = data.reduce((sum, log) => sum + (log.characterCount || 0), 0);
-    const avgLatency =
-      totalRequests > 0
-        ? Math.round(data.reduce((sum, log) => sum + (log.latencyMs || 0), 0) / totalRequests)
-        : 0;
-
-    return NextResponse.json({
-      status: 'Active',
-      profile_id: profileId,
-      total_requests: totalRequests,
-      total_characters_processed: totalChars,
-      average_latency_ms: avgLatency,
-      logs: data,
-    });
-  } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : 'Telemetry query failed' },
-      { status: 500 }
-    );
-  }
+  return NextResponse.json({
+    user: { id: user.id, email: user.email },
+    summary: {
+      totalSessions: sessions?.length || 0,
+      totalCharacters: totalChars,
+      avgLatencyMs: avgLatency,
+    },
+    recentSessions: sessions || [],
+  });
 }
