@@ -19,7 +19,9 @@ import {
   Volume2,
   Loader2,
   Square,
+  UserCheck,
 } from 'lucide-react';
+import { supabase } from '@/lib/supabaseClient';
 
 interface Attachment {
   mime_type: string;
@@ -51,6 +53,7 @@ export default function VuxoTerminalPage() {
   const [isDictating, setIsDictating] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [attachment, setAttachment] = useState<{ name: string; data: string; mime_type: string } | null>(null);
+  const [userProfile, setUserProfile] = useState<{ id: string; email: string; full_name?: string } | null>(null);
 
   const [synthesizingIndex, setSynthesizingIndex] = useState<number | null>(null);
   const [playingIndex, setPlayingIndex] = useState<number | null>(null);
@@ -61,6 +64,34 @@ export default function VuxoTerminalPage() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session?.user) {
+        setUserProfile({
+          id: session.user.id,
+          email: session.user.email || '',
+          full_name: session.user.user_metadata?.full_name,
+        });
+      }
+    });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (session?.user) {
+        setUserProfile({
+          id: session.user.id,
+          email: session.user.email || '',
+          full_name: session.user.user_metadata?.full_name,
+        });
+      } else {
+        setUserProfile(null);
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -108,7 +139,10 @@ export default function VuxoTerminalPage() {
       const response = await fetch('/api/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({
+          text,
+          profile_id: userProfile?.id,
+        }),
       });
 
       if (!response.ok) {
@@ -175,7 +209,11 @@ export default function VuxoTerminalPage() {
                 const res = await fetch('/api/transcribe', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ audio_base64: base64Data, filename: 'dictation.webm' }),
+                  body: JSON.stringify({
+                    audio_base64: base64Data,
+                    filename: 'dictation.webm',
+                    profile_id: userProfile?.id,
+                  }),
                 });
 
                 if (!res.ok) {
@@ -233,6 +271,19 @@ export default function VuxoTerminalPage() {
     setAttachment(null);
     setIsLoading(true);
 
+    // Sync ChatSession to Supabase if authenticated
+    if (userProfile?.id && userMessageContent) {
+      supabase
+        .from('ChatSession')
+        .insert({
+          profileId: userProfile.id,
+          title: userMessageContent.slice(0, 45) || 'Clinical Dictation Session',
+        })
+        .then(({ error }) => {
+          if (error) console.log('ChatSession sync skipped:', error.message);
+        });
+    }
+
     try {
       if (isStreaming) {
         const response = await fetch('/api/chat/stream', {
@@ -247,6 +298,7 @@ export default function VuxoTerminalPage() {
             model_provider: provider,
             temperature,
             stream: true,
+            profile_id: userProfile?.id,
           }),
         });
 
@@ -310,6 +362,7 @@ export default function VuxoTerminalPage() {
             model_provider: provider,
             temperature,
             stream: false,
+            profile_id: userProfile?.id,
           }),
         });
 
@@ -415,10 +468,19 @@ export default function VuxoTerminalPage() {
         </div>
 
         <div className="flex items-center space-x-3">
-          <span className="text-xs text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-3 py-1 rounded-full flex items-center space-x-1.5">
-            <ShieldCheck className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">256-Bit Encrypted</span>
-          </span>
+          {userProfile ? (
+            <span className="text-xs text-[#D4AF37] bg-[#D4AF37]/10 border border-[#D4AF37]/30 px-3 py-1 rounded-full flex items-center space-x-1.5">
+              <UserCheck className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline max-w-[140px] truncate">
+                {userProfile.full_name || userProfile.email}
+              </span>
+            </span>
+          ) : (
+            <span className="text-xs text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-3 py-1 rounded-full flex items-center space-x-1.5">
+              <ShieldCheck className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">256-Bit Encrypted</span>
+            </span>
+          )}
         </div>
       </header>
 
@@ -475,7 +537,9 @@ export default function VuxoTerminalPage() {
           >
             <div className="flex items-center space-x-2 mb-1 px-1">
               <span className="text-[10px] uppercase font-bold tracking-widest text-neutral-500">
-                {msg.role === 'user' ? 'Operator' : msg.provider || provider.toUpperCase()}
+                {msg.role === 'user'
+                  ? userProfile?.full_name || 'Operator'
+                  : msg.provider || provider.toUpperCase()}
               </span>
             </div>
 

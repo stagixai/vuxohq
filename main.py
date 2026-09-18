@@ -252,6 +252,9 @@ class ChatResponse(BaseModel):
 class TranscribeRequest(BaseModel):
     audio_base64: str = Field(description="Base64 encoded audio bytes")
     filename: str = Field(default="dictation.webm", description="Optional filename")
+    profile_id: str | None = Field(
+        default=None, description="Optional Supabase profile UUID for telemetry"
+    )
 
 
 # --- Core Provider Invocation Handlers ---
@@ -402,6 +405,7 @@ async def transcribe_audio(request: TranscribeRequest):
     """
     Transcribes base64 audio payload using Groq Whisper API (whisper-large-v3-turbo).
     """
+    start_time = time.time()
     if not groq_client:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -422,6 +426,13 @@ async def transcribe_audio(request: TranscribeRequest):
             transcription.text
             if hasattr(transcription, "text")
             else str(transcription)
+        )
+        latency_ms = int((time.time() - start_time) * 1000)
+        await log_synthesis_telemetry(
+            model_used="whisper-large-v3-turbo",
+            latency_ms=latency_ms,
+            char_count=len(text),
+            profile_id=request.profile_id,
         )
         return {
             "text": text,
