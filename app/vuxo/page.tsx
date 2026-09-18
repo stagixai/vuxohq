@@ -468,6 +468,12 @@ export default function VuxoTerminalPage() {
         </div>
 
         <div className="flex items-center space-x-3">
+          <Link
+            href="/dashboard"
+            className="text-xs font-semibold text-neutral-400 hover:text-[#D4AF37] px-3 py-1 rounded bg-white/5 border border-white/10 transition-all hidden sm:inline"
+          >
+            Telemetry
+          </Link>
           {userProfile ? (
             <span className="text-xs text-[#D4AF37] bg-[#D4AF37]/10 border border-[#D4AF37]/30 px-3 py-1 rounded-full flex items-center space-x-1.5">
               <UserCheck className="w-3.5 h-3.5" />

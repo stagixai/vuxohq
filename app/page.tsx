@@ -108,6 +108,12 @@ export default function VuxoWebsite() {
             <Lock className="w-3 h-3 text-[#D4AF37]" />
             <span>HIPAA-Ready Architecture</span>
           </span>
+          <Link
+            href="/dashboard"
+            className="text-sm font-semibold hover:text-[#D4AF37] transition-colors hidden sm:inline"
+          >
+            Telemetry
+          </Link>
           <button
             onClick={() => setIsAuthModalOpen(true)}
             className="text-sm font-semibold hover:text-[#D4AF37] transition-colors"
