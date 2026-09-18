@@ -28,8 +28,8 @@ class StreamingAudioPlayer {
   private queue: ArrayBuffer[] = [];
   private isPlaying = false;
 
-  constructor() {
-    if (typeof window !== 'undefined') {
+  private async ensureContext() {
+    if (!this.audioContext && typeof window !== 'undefined') {
       const AudioCtx =
         window.AudioContext ||
         (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
@@ -37,10 +37,14 @@ class StreamingAudioPlayer {
         this.audioContext = new AudioCtx();
       }
     }
+    if (this.audioContext && this.audioContext.state === 'suspended') {
+      await this.audioContext.resume();
+    }
   }
 
   public async addChunk(base64Audio: string) {
-    const base64Data = base64Audio.split(',')[1] || base64Audio;
+    await this.ensureContext();
+    const base64Data = base64Audio.includes(',') ? base64Audio.split(',')[1] : base64Audio;
     const binaryString = window.atob(base64Data);
     const bytes = new Uint8Array(binaryString.length);
     for (let i = 0; i < binaryString.length; i++) {
@@ -54,6 +58,7 @@ class StreamingAudioPlayer {
   }
 
   private async playNext() {
+    await this.ensureContext();
     if (this.queue.length === 0 || !this.audioContext) {
       this.isPlaying = false;
       return;
@@ -63,9 +68,6 @@ class StreamingAudioPlayer {
     const chunk = this.queue.shift()!;
 
     try {
-      if (this.audioContext.state === 'suspended') {
-        await this.audioContext.resume();
-      }
       const audioBuffer = await this.audioContext.decodeAudioData(chunk);
       const source = this.audioContext.createBufferSource();
       source.buffer = audioBuffer;
@@ -119,6 +121,7 @@ export default function VuxoTerminalPage() {
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [attachment, setAttachment] = useState<{ name: string; data: string; mime_type: string } | null>(null);
   const [userProfile, setUserProfile] = useState<{ id: string; email: string; full_name?: string } | null>(null);
+  const [accessToken, setAccessToken] = useState<string | null>(null);
 
   const [synthesizingIndex, setSynthesizingIndex] = useState<number | null>(null);
   const [playingIndex, setPlayingIndex] = useState<number | null>(null);
@@ -127,6 +130,7 @@ export default function VuxoTerminalPage() {
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
+  const recordingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -141,6 +145,7 @@ export default function VuxoTerminalPage() {
           email: session.user.email || '',
           full_name: session.user.user_metadata?.full_name,
         });
+        setAccessToken(session.access_token);
       }
     });
 
@@ -153,13 +158,26 @@ export default function VuxoTerminalPage() {
           email: session.user.email || '',
           full_name: session.user.user_metadata?.full_name,
         });
+        setAccessToken(session.access_token);
       } else {
         setUserProfile(null);
+        setAccessToken(null);
       }
     });
 
     return () => subscription.unsubscribe();
   }, []);
+
+  const getAuthHeaders = (): Record<string, string> => {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'x-profile-id': userProfile?.id || '',
+    };
+    if (accessToken) {
+      headers['Authorization'] = `Bearer ${accessToken}`;
+    }
+    return headers;
+  };
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -207,10 +225,7 @@ export default function VuxoTerminalPage() {
     try {
       const response = await fetch('/api/tts', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-profile-id': userProfile?.id || '',
-        },
+        headers: getAuthHeaders(),
         body: JSON.stringify({
           text,
           profile_id: userProfile?.id,
@@ -253,7 +268,14 @@ export default function VuxoTerminalPage() {
   const toggleDictation = async () => {
     if (!isDictating) {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            channelCount: 1, // Mono
+            sampleRate: 16000, // 16kHz optimal for Whisper and keeps payload small
+            echoCancellation: true,
+            noiseSuppression: true,
+          },
+        });
         audioChunksRef.current = [];
         const mediaRecorder = new MediaRecorder(stream);
         mediaRecorderRef.current = mediaRecorder;
@@ -265,6 +287,10 @@ export default function VuxoTerminalPage() {
         };
 
         mediaRecorder.onstop = async () => {
+          if (recordingTimeoutRef.current) {
+            clearTimeout(recordingTimeoutRef.current);
+            recordingTimeoutRef.current = null;
+          }
           stream.getTracks().forEach((track) => track.stop());
           const audioBlob = new Blob(audioChunksRef.current, { type: mediaRecorder.mimeType || 'audio/webm' });
           if (audioBlob.size === 0) {
@@ -280,10 +306,7 @@ export default function VuxoTerminalPage() {
               try {
                 const res = await fetch('/api/transcribe', {
                   method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/json',
-                    'x-profile-id': userProfile?.id || '',
-                  },
+                  headers: getAuthHeaders(),
                   body: JSON.stringify({
                     audio_base64: base64Data,
                     filename: 'dictation.webm',
@@ -317,11 +340,23 @@ export default function VuxoTerminalPage() {
 
         mediaRecorder.start(250);
         setIsDictating(true);
+
+        // Auto-stop recording at 30s to prevent Vercel Serverless 4.5MB payload limit
+        recordingTimeoutRef.current = setTimeout(() => {
+          if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+            mediaRecorderRef.current.stop();
+            alert('Recording automatically stopped at 30 seconds to optimize serverless processing payload.');
+          }
+        }, 30000);
       } catch (err) {
         alert(`Microphone access error: ${err instanceof Error ? err.message : 'Permission denied'}`);
         setIsDictating(false);
       }
     } else {
+      if (recordingTimeoutRef.current) {
+        clearTimeout(recordingTimeoutRef.current);
+        recordingTimeoutRef.current = null;
+      }
       if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
         mediaRecorderRef.current.stop();
       }
@@ -363,10 +398,7 @@ export default function VuxoTerminalPage() {
       if (isStreaming) {
         const response = await fetch('/api/chat/stream', {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-profile-id': userProfile?.id || '',
-          },
+          headers: getAuthHeaders(),
           body: JSON.stringify({
             messages: newMessages.map((m) => ({
               role: m.role,
@@ -430,10 +462,7 @@ export default function VuxoTerminalPage() {
       } else {
         const response = await fetch('/api/chat', {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-profile-id': userProfile?.id || '',
-          },
+          headers: getAuthHeaders(),
           body: JSON.stringify({
             messages: newMessages.map((m) => ({
               role: m.role,

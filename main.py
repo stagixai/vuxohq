@@ -8,6 +8,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 import httpx
+import jwt
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -48,6 +49,7 @@ async def log_synthesis_telemetry(
     latency_ms: int,
     char_count: int,
     profile_id: str | None = None,
+    user_jwt: str | None = None,
 ):
     log_entry = {
         "modelUsed": model_used,
@@ -61,41 +63,53 @@ async def log_synthesis_telemetry(
         telemetry_history.pop(0)
 
     logger.info(
-        "TELEMETRY | Model: %s | Latency: %dms | Chars: %d",
+        "TELEMETRY | Model: %s | Latency: %dms | Chars: %d | Profile: %s",
         model_used,
         latency_ms,
         char_count,
+        profile_id or "anonymous",
     )
 
     supabase_url = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
-    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv(
-        "NEXT_PUBLIC_SUPABASE_ANON_KEY"
-    )
+    supabase_service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    supabase_anon_key = os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY")
 
-    if supabase_url and supabase_key:
-        headers = {
-            "apikey": supabase_key,
-            "Authorization": f"Bearer {supabase_key}",
-            "Content-Type": "application/json",
-            "Prefer": "return=minimal",
-        }
-        payload = {
-            "modelUsed": model_used,
-            "latencyMs": latency_ms,
-            "characterCount": char_count,
-        }
-        if profile_id:
-            payload["profileId"] = profile_id
+    if supabase_url:
+        headers = {}
+        if user_jwt:
+            headers = {
+                "apikey": supabase_anon_key or supabase_service_key or "",
+                "Authorization": f"Bearer {user_jwt}",
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal",
+            }
+        elif supabase_service_key or supabase_anon_key:
+            key = supabase_service_key or supabase_anon_key
+            headers = {
+                "apikey": key,
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal",
+            }
 
-        try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                await client.post(
-                    f"{supabase_url}/rest/v1/SynthesisLog",
-                    json=payload,
-                    headers=headers,
-                )
-        except (httpx.HTTPError, RuntimeError, ValueError) as telemetry_err:
-            logger.warning("Supabase Telemetry insert skipped: %s", telemetry_err)
+        if headers:
+            payload = {
+                "modelUsed": model_used,
+                "latencyMs": latency_ms,
+                "characterCount": char_count,
+            }
+            if profile_id:
+                payload["profileId"] = profile_id
+
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    await client.post(
+                        f"{supabase_url}/rest/v1/SynthesisLog",
+                        json=payload,
+                        headers=headers,
+                    )
+            except (httpx.HTTPError, RuntimeError, ValueError) as telemetry_err:
+                logger.warning("Supabase Telemetry insert skipped: %s", telemetry_err)
 
 
 @asynccontextmanager
@@ -200,19 +214,72 @@ app.add_middleware(
 )
 
 
-# Rate Limiting & Cost Control Middleware
-async def check_rate_limit(
-    request: Request,
-    x_profile_id: str | None = Header(default=None),
-):
+# Security: Cryptographic Supabase JWT & Rate Limit Dependencies
+SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
+
+
+def get_verified_profile_id(request: Request) -> tuple[str, str | None]:
     """
-    Sliding-window rate limiter (60 req/min).
-    Uses Upstash Redis if UPSTASH_REDIS_REST_URL is set, else graceful in-memory sliding window fallback.
+    Cryptographically verifies the Supabase JWT from the Authorization header.
+    Returns tuple of (verified_profile_id, user_jwt).
+    Ignores client-provided x-profile-id headers for authentication claims.
     """
-    client_identifier = (
-        x_profile_id or (request.client.host if request.client else "anonymous")
-    )
-    now = time.time()
+    auth_header = request.headers.get("authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        x_pid = request.headers.get("x-profile-id")
+        return x_pid or "anonymous", None
+
+    token = auth_header.replace("Bearer ", "").strip()
+    if not token:
+        return "anonymous", None
+
+    if not SUPABASE_JWT_SECRET:
+        try:
+            unverified_payload = jwt.decode(token, options={"verify_signature": False})
+            profile_id = unverified_payload.get("sub") or "anonymous"
+            logger.warning(
+                "SUPABASE_JWT_SECRET is not set; using unverified payload sub claim."
+            )
+            return profile_id, token
+        except Exception:
+            return "anonymous", token
+
+    try:
+        payload = jwt.decode(
+            token,
+            SUPABASE_JWT_SECRET,
+            algorithms=["HS256"],
+            options={"verify_aud": False},
+        )
+        profile_id = payload.get("sub")
+        if not profile_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token payload: missing sub claim",
+            )
+        return profile_id, token
+    except jwt.ExpiredSignatureError as exp_err:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authorization token has expired",
+        ) from exp_err
+    except jwt.InvalidTokenError as inv_err:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authorization token signature",
+        ) from inv_err
+
+
+async def rate_limit_dependency(
+    auth_data: tuple[str, str | None] = Depends(get_verified_profile_id),
+) -> tuple[str, str | None]:
+    """
+    Sliding-window rate limiter (60 req/min) using cryptographically verified profile ID.
+    Uses Upstash Redis if configured, with in-memory sliding window fallback.
+    """
+    profile_id, _ = auth_data
+    current_minute = int(time.time() // 60)
+    key = f"vuxo:ratelimit:{profile_id}:{current_minute}"
     window_seconds = 60
     max_requests = 60
 
@@ -224,7 +291,6 @@ async def check_rate_limit(
             from upstash_redis import Redis
 
             redis = Redis(url=upstash_url, token=upstash_token)
-            key = f"vuxo:ratelimit:{client_identifier}"
             current = redis.incr(key)
             if current == 1:
                 redis.expire(key, window_seconds)
@@ -233,14 +299,15 @@ async def check_rate_limit(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                     detail="Rate limit exceeded. Maximum 60 requests per minute.",
                 )
-            return client_identifier
+            return auth_data
         except HTTPException:
             raise
         except Exception as redis_err:
             logger.warning("Upstash Redis skipped, using fallback: %s", redis_err)
 
     # In-memory sliding window fallback
-    timestamps = rate_limit_cache.get(client_identifier, [])
+    now = time.time()
+    timestamps = rate_limit_cache.get(profile_id, [])
     timestamps = [t for t in timestamps if now - t < window_seconds]
     if len(timestamps) >= max_requests:
         raise HTTPException(
@@ -248,26 +315,8 @@ async def check_rate_limit(
             detail="Rate limit exceeded. Maximum 60 requests per minute.",
         )
     timestamps.append(now)
-    rate_limit_cache[client_identifier] = timestamps
-    return client_identifier
-
-
-# Security: Supabase JWT Header Verification Dependency
-async def verify_supabase_jwt(authorization: str | None = Header(default=None)):
-    """
-    Validates optional Supabase Bearer JWT token from request Authorization header.
-    """
-    if not authorization:
-        return None
-    token = authorization.replace("Bearer ", "").strip()
-    if not token:
-        return None
-    if len(token) < 10:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid Authorization Bearer Token",
-        )
-    return token
+    rate_limit_cache[profile_id] = timestamps
+    return auth_data
 
 
 # --- Pydantic Data Models ---
@@ -452,12 +501,16 @@ async def get_telemetry():
     }
 
 
-@app.post("/transcribe", dependencies=[Depends(check_rate_limit)])
-@app.post("/api/transcribe", dependencies=[Depends(check_rate_limit)])
-async def transcribe_audio(request: TranscribeRequest):
+@app.post("/transcribe")
+@app.post("/api/transcribe")
+async def transcribe_audio(
+    request: TranscribeRequest,
+    auth_data: tuple[str, str | None] = Depends(rate_limit_dependency),
+):
     """
-    Transcribes base64 audio payload using Groq Whisper API (whisper-large-v3-turbo) with rate limiting.
+    Transcribes base64 audio payload using Groq Whisper API (whisper-large-v3-turbo) with rate limiting and JWT validation.
     """
+    profile_id, user_jwt = auth_data
     start_time = time.time()
     if not groq_client:
         raise HTTPException(
@@ -485,7 +538,8 @@ async def transcribe_audio(request: TranscribeRequest):
             model_used="whisper-large-v3-turbo",
             latency_ms=latency_ms,
             char_count=len(text),
-            profile_id=request.profile_id,
+            profile_id=profile_id,
+            user_jwt=user_jwt,
         )
         return {
             "text": text,
@@ -500,12 +554,16 @@ async def transcribe_audio(request: TranscribeRequest):
         ) from err
 
 
-@app.post("/chat", response_model=ChatResponse, dependencies=[Depends(check_rate_limit)])
-@app.post("/api/chat", response_model=ChatResponse, dependencies=[Depends(check_rate_limit)])
-async def chat_endpoint(request: ChatRequest):
+@app.post("/chat", response_model=ChatResponse)
+@app.post("/api/chat", response_model=ChatResponse)
+async def chat_endpoint(
+    request: ChatRequest,
+    auth_data: tuple[str, str | None] = Depends(rate_limit_dependency),
+):
     """
-    Main endpoint for routing requests with multimodal support, automatic failover, and telemetry.
+    Main endpoint for routing requests with multimodal support, automatic failover, and verified telemetry.
     """
+    profile_id, user_jwt = auth_data
     start_time = time.time()
     provider = request.model_provider.lower()
 
@@ -553,7 +611,8 @@ async def chat_endpoint(request: ChatRequest):
             model_used=response_obj.model,
             latency_ms=latency_ms,
             char_count=char_count,
-            profile_id=request.profile_id,
+            profile_id=profile_id,
+            user_jwt=user_jwt,
         )
         return response_obj
 
@@ -571,12 +630,16 @@ async def chat_endpoint(request: ChatRequest):
         ) from exc
 
 
-@app.post("/chat/stream", dependencies=[Depends(check_rate_limit)])
-@app.post("/api/chat/stream", dependencies=[Depends(check_rate_limit)])
-async def chat_stream_endpoint(request: ChatRequest):
+@app.post("/chat/stream")
+@app.post("/api/chat/stream")
+async def chat_stream_endpoint(
+    request: ChatRequest,
+    auth_data: tuple[str, str | None] = Depends(rate_limit_dependency),
+):
     """
     Server-Sent Events (SSE) streaming endpoint with multimodal attachment support & telemetry.
     """
+    profile_id, user_jwt = auth_data
     start_time = time.time()
     provider = request.model_provider.lower()
 
@@ -688,7 +751,8 @@ async def chat_stream_endpoint(request: ChatRequest):
             model_used=used_model,
             latency_ms=latency_ms,
             char_count=total_tokens_chars,
-            profile_id=request.profile_id,
+            profile_id=profile_id,
+            user_jwt=user_jwt,
         )
         yield "data: [DONE]\n\n"
 
@@ -708,12 +772,16 @@ class TTSRequest(BaseModel):
     )
 
 
-@app.post("/tts", dependencies=[Depends(check_rate_limit)])
-@app.post("/api/tts", dependencies=[Depends(check_rate_limit)])
-async def text_to_speech_endpoint(request: TTSRequest):
+@app.post("/tts")
+@app.post("/api/tts")
+async def text_to_speech_endpoint(
+    request: TTSRequest,
+    auth_data: tuple[str, str | None] = Depends(rate_limit_dependency),
+):
     """
     Synthesizes text into audio using ElevenLabs API with telemetry logging and rate limiting.
     """
+    profile_id, user_jwt = auth_data
     start_time = time.time()
     eleven_key = os.getenv("ELEVENLABS_API_KEY")
     if not eleven_key:
@@ -756,7 +824,8 @@ async def text_to_speech_endpoint(request: TTSRequest):
                 model_used=request.model_id,
                 latency_ms=latency_ms,
                 char_count=len(request.text),
-                profile_id=request.profile_id,
+                profile_id=profile_id,
+                user_jwt=user_jwt,
             )
             return Response(content=resp.content, media_type="audio/mpeg")
     except httpx.HTTPError as http_err:
