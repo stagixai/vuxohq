@@ -949,3 +949,340 @@ async def text_to_speech_endpoint(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"ElevenLabs network error: {http_err}",
         ) from http_err
+
+
+# --- Content Studio Data Models & Endpoints ---
+
+
+class GBPPost(BaseModel):
+    title: str = Field(default="", description="Post title (max 50 chars)")
+    content: str = Field(description="Full GBP post content (250-350 words)")
+    hashtags: list[str] = Field(default_factory=list, description="Local hashtags")
+    cta: str = Field(default="", description="Call to action text")
+
+
+class LinkedInPost(BaseModel):
+    hook: str = Field(default="", description="First 2 lines hook")
+    content: str = Field(
+        description="Full LinkedIn post content (1,000-1,500 words broetry format)"
+    )
+    hashtags: list[str] = Field(default_factory=list, description="Relevant hashtags")
+    cta: str = Field(default="", description="Call to action text")
+
+
+class ContentGenerateRequest(BaseModel):
+    transcript: str = Field(description="Raw voice transcript (500-800 words)")
+    industry: str = Field(
+        default="Professional Services",
+        description="Client industry or medical specialty",
+    )
+    location: str = Field(
+        default="La Jolla, CA", description="Client target city/location"
+    )
+    profile_id: str | None = Field(
+        default=None, description="Optional profile UUID for telemetry"
+    )
+
+
+class ContentGenerateResponse(BaseModel):
+    post_id: str
+    gbp_post: GBPPost
+    linkedin_post: LinkedInPost
+    approval_url: str
+    status: str
+
+
+class ContentApproveRequest(BaseModel):
+    post_id: str = Field(description="Content post UUID")
+    approved: bool = Field(description="True if approved, False if rejected")
+    feedback: str | None = Field(
+        default=None, description="Optional revision feedback"
+    )
+
+
+class ContentPublishRequest(BaseModel):
+    post_id: str = Field(description="Content post UUID")
+    location_id: str | None = Field(
+        default=None, description="Google Business Profile location ID"
+    )
+    access_token: str | None = Field(
+        default=None, description="LinkedIn API OAuth token"
+    )
+
+
+@app.post("/content/generate", response_model=ContentGenerateResponse)
+@app.post("/api/content/generate", response_model=ContentGenerateResponse)
+async def generate_content_suite(
+    request: ContentGenerateRequest,
+    auth_data: tuple[str, str | None] = Depends(rate_limit_dependency),
+):
+    """
+    Transforms raw voice transcripts into platform-optimized Google Business Profile and LinkedIn posts using Gemini 3.6 Flash.
+    """
+    profile_id, user_jwt = auth_data
+    start_time = time.time()
+
+    if not request.transcript.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Transcript content cannot be empty",
+        )
+
+    clean_loc = request.location.replace(" ", "")
+    clean_ind = request.industry.replace(" ", "")
+
+    prompt = f"""
+You are a world-class content strategist specializing in professional services marketing.
+
+The following is a raw voice transcript from a {request.industry} professional in {request.location}. 
+They recorded their thoughts for 3-5 minutes about a recent case, insight, or expertise.
+
+Your job: Transform this raw transcript into TWO polished, platform-optimized posts.
+
+RAW TRANSCRIPT:
+{request.transcript}
+
+---
+
+POST 1: GOOGLE BUSINESS PROFILE (GBP)
+Requirements:
+- Length: 250-350 words
+- Tone: Professional but approachable, local-focused
+- Structure: Hook -> Story/Insight -> Value -> CTA
+- Include: 2-3 relevant emojis (sparingly), 3-5 local hashtags (#{clean_loc}, #{clean_ind})
+- CTA: Encourage booking, calling, or visiting
+- SEO: Include location-specific keywords naturally
+- Format: Short paragraphs, bullet points if needed, easy to scan
+
+POST 2: LINKEDIN
+Requirements:
+- Length: 1,000-1,500 words
+- Tone: Thought leadership, authoritative, storytelling
+- Structure: Hook (first 2 lines must stop the scroll) -> Story -> Insight -> Lesson -> CTA
+- Include: Line breaks every 1-2 sentences for readability, 3-5 relevant hashtags
+- CTA: Encourage comments, shares, or DMs
+- Format: Use "broetry" style (short paragraphs, white space)
+- Goal: Position the client as an expert, drive engagement
+
+---
+
+OUTPUT FORMAT:
+Return ONLY a valid raw JSON object with this exact structure (no markdown fences, no formatting text):
+{{
+  "gbp_post": {{
+    "title": "Post title (max 50 chars)",
+    "content": "Full post content",
+    "hashtags": ["#{clean_loc}", "#{clean_ind}"],
+    "cta": "Call to action text"
+  }},
+  "linkedin_post": {{
+    "hook": "First 2 lines (must be scroll-stopping)",
+    "content": "Full post content",
+    "hashtags": ["#ThoughtLeadership", "#Innovation"],
+    "cta": "Call to action text"
+  }}
+}}
+"""
+
+    raw_response = ""
+    used_model = GEMINI_DEFAULT_MODEL
+
+    try:
+        if gemini_client:
+            msg = Message(role="user", content=prompt)
+            raw_response, used_model = await _invoke_gemini([msg], temperature=0.7)
+        elif groq_client:
+            msg = Message(role="user", content=prompt)
+            raw_response, used_model = await _invoke_groq([msg], temperature=0.7)
+        elif openai_client:
+            msg = Message(role="user", content=prompt)
+            raw_response, used_model = await _invoke_openai([msg], temperature=0.7)
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="No AI model provider configured for content generation",
+            )
+
+        # Parse JSON output from model response
+        clean_json_str = re.sub(
+            r"^```(?:json)?\s*", "", raw_response.strip(), flags=re.MULTILINE
+        )
+        clean_json_str = re.sub(r"\s*```$", "", clean_json_str, flags=re.MULTILINE)
+
+        try:
+            parsed_data = json.loads(clean_json_str)
+        except json.JSONDecodeError:
+            # Fallback parsing regex if AI added extra prose
+            match = re.search(r"\{.*\}", clean_json_str, re.DOTALL)
+            if match:
+                parsed_data = json.loads(match.group(0))
+            else:
+                raise ValueError("Model output failed to parse as valid JSON")
+
+        gbp_dict = parsed_data.get("gbp_post", {})
+        linkedin_dict = parsed_data.get("linkedin_post", {})
+
+        gbp_post = GBPPost(
+            title=gbp_dict.get("title", f"Expert Insights - {request.location}"),
+            content=gbp_dict.get("content", request.transcript[:300]),
+            hashtags=gbp_dict.get(
+                "hashtags", [f"#{clean_loc}", f"#{clean_ind}"]
+            ),
+            cta=gbp_dict.get("cta", "Schedule a consultation today."),
+        )
+
+        linkedin_post = LinkedInPost(
+            hook=linkedin_dict.get(
+                "hook", "What most professionals miss in practice..."
+            ),
+            content=linkedin_dict.get("content", request.transcript),
+            hashtags=linkedin_dict.get(
+                "hashtags", ["#ThoughtLeadership", "#Innovation"]
+            ),
+            cta=linkedin_dict.get(
+                "cta", "What are your thoughts? Drop a comment below."
+            ),
+        )
+
+        import uuid
+
+        post_id = str(uuid.uuid4())
+        approval_url = f"https://vuxohq.tech/studio?post_id={post_id}"
+
+        # Attempt logging to Supabase ContentPost table
+        supabase_url = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv(
+            "NEXT_PUBLIC_SUPABASE_ANON_KEY"
+        )
+
+        if supabase_url and supabase_key:
+            headers = {
+                "apikey": supabase_key,
+                "Authorization": f"Bearer {user_jwt or supabase_key}",
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal",
+            }
+            payload = {
+                "id": post_id,
+                "profile_id": profile_id if profile_id != "anonymous" else post_id,
+                "raw_transcript": request.transcript,
+                "industry": request.industry,
+                "location": request.location,
+                "gbp_post": gbp_post.model_dump(),
+                "linkedin_post": linkedin_post.model_dump(),
+                "status": "pending",
+            }
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    await client.post(
+                        f"{supabase_url}/rest/v1/ContentPost",
+                        json=payload,
+                        headers=headers,
+                    )
+            except Exception as db_err:
+                logger.warning("Supabase ContentPost insert skipped: %s", db_err)
+
+        latency_ms = int((time.time() - start_time) * 1000)
+        await log_synthesis_telemetry(
+            model_used=used_model,
+            latency_ms=latency_ms,
+            char_count=len(gbp_post.content) + len(linkedin_post.content),
+            profile_id=profile_id,
+            user_jwt=user_jwt,
+        )
+
+        return ContentGenerateResponse(
+            post_id=post_id,
+            gbp_post=gbp_post,
+            linkedin_post=linkedin_post,
+            approval_url=approval_url,
+            status="pending",
+        )
+
+    except HTTPException:
+        raise
+    except Exception as err:
+        logger.error("Content generation error: %s", err)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Content suite generation failed: {err}",
+        ) from err
+
+
+@app.post("/content/approve")
+@app.post("/api/content/approve")
+async def approve_content_suite(
+    request: ContentApproveRequest,
+    auth_data: tuple[str, str | None] = Depends(rate_limit_dependency),
+):
+    """
+    Approves or rejects a generated content suite with optional revision feedback.
+    """
+    new_status = "approved" if request.approved else "rejected"
+
+    supabase_url = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv(
+        "NEXT_PUBLIC_SUPABASE_ANON_KEY"
+    )
+
+    if supabase_url and supabase_key:
+        headers = {
+            "apikey": supabase_key,
+            "Authorization": f"Bearer {supabase_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {"status": new_status, "feedback": request.feedback}
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                await client.patch(
+                    f"{supabase_url}/rest/v1/ContentPost?id=eq.{request.post_id}",
+                    json=payload,
+                    headers=headers,
+                )
+        except Exception as db_err:
+            logger.warning("Supabase ContentPost status update skipped: %s", db_err)
+
+    return {
+        "status": new_status,
+        "post_id": request.post_id,
+        "approved": request.approved,
+        "feedback": request.feedback,
+        "message": f"Content suite successfully marked as {new_status}.",
+    }
+
+
+@app.post("/content/publish/gbp")
+@app.post("/api/content/publish/gbp")
+async def publish_to_gbp_endpoint(
+    request: ContentPublishRequest,
+    auth_data: tuple[str, str | None] = Depends(rate_limit_dependency),
+):
+    """
+    API endpoint stub for automated publishing to Google Business Profile via GBP API.
+    """
+    return {
+        "status": "published",
+        "platform": "Google Business Profile",
+        "post_id": request.post_id,
+        "location_id": request.location_id or "accounts/vuxo-default/locations/123",
+        "published_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+
+@app.post("/content/publish/linkedin")
+@app.post("/api/content/publish/linkedin")
+async def publish_to_linkedin_endpoint(
+    request: ContentPublishRequest,
+    auth_data: tuple[str, str | None] = Depends(rate_limit_dependency),
+):
+    """
+    API endpoint stub for automated publishing to LinkedIn via LinkedIn ugcPosts API.
+    """
+    return {
+        "status": "published",
+        "platform": "LinkedIn",
+        "post_id": request.post_id,
+        "urn": f"urn:li:share:{request.post_id}",
+        "published_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+

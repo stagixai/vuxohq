@@ -78,3 +78,29 @@ BEGIN
   RETURN result;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Pillar 4: VUXO Content Studio (B2B Recurring Revenue Service Engine)
+CREATE TABLE IF NOT EXISTS "ContentPost" (
+  id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+  profile_id UUID NOT NULL,
+  raw_transcript TEXT NOT NULL,
+  industry TEXT,
+  location TEXT,
+  gbp_post JSONB NOT NULL,
+  linkedin_post JSONB NOT NULL,
+  status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected', 'published')),
+  feedback TEXT,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+ALTER TABLE "ContentPost" ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Users can view own content posts" ON "ContentPost";
+CREATE POLICY "Users can view own content posts" ON "ContentPost" FOR SELECT USING (auth.uid() = profile_id);
+
+DROP POLICY IF EXISTS "Users can insert own content posts" ON "ContentPost";
+CREATE POLICY "Users can insert own content posts" ON "ContentPost" FOR INSERT WITH CHECK (auth.uid() = profile_id);
+
+DROP POLICY IF EXISTS "Users can update own content posts" ON "ContentPost";
+CREATE POLICY "Users can update own content posts" ON "ContentPost" FOR UPDATE USING (auth.uid() = profile_id);
+

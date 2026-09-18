@@ -605,6 +605,13 @@ export default function VuxoTerminalPage() {
 
         <div className="flex items-center space-x-3">
           <Link
+            href="/studio"
+            className="text-xs font-semibold text-black bg-[#D4AF37] hover:bg-[#b5942d] px-3 py-1 rounded transition-all flex items-center space-x-1 shadow-[0_0_10px_rgba(212,175,55,0.3)]"
+          >
+            <Sparkles className="w-3.5 h-3.5" />
+            <span>Content Studio</span>
+          </Link>
+          <Link
             href="/dashboard"
             className="text-xs font-semibold text-neutral-400 hover:text-[#D4AF37] px-3 py-1 rounded bg-white/5 border border-white/10 transition-all hidden sm:inline"
           >
