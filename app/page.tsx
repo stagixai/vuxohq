@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
+import { motion } from 'framer-motion';
 import {
   Mic,
   ShieldCheck,
@@ -55,6 +56,12 @@ export default function VuxoWebsite() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [activeSampleIndex, setActiveSampleIndex] = useState(0);
   const [audioProgress, setAudioProgress] = useState(0);
+
+  // Staggered animation variants
+  const fadeUp = {
+    hidden: { opacity: 0, y: 30 },
+    visible: { opacity: 1, y: 0 },
+  };
 
   useEffect(() => {
     let interval: NodeJS.Timeout;
@@ -116,36 +123,62 @@ export default function VuxoWebsite() {
         </div>
       </header>
 
-      {/* Hero Section */}
+      {/* Hero Section with Framer Motion Stagger */}
       <section className="max-w-5xl mx-auto px-6 pt-24 pb-20 text-center">
-        <div className="inline-flex items-center space-x-2 px-3 py-1 rounded-full bg-[#D4AF37]/10 border border-[#D4AF37]/30 text-[#D4AF37] text-xs font-medium mb-8">
-          <Activity className="w-3.5 h-3.5" />
-          <span>Secure B2B Medical & Executive Infrastructure</span>
-        </div>
-        <h1 className="text-5xl md:text-7xl font-extrabold tracking-tight text-white mb-6 leading-tight">
-          Transform Spoken Expertise Into <br className="hidden md:block" />
-          <span className="bg-gradient-to-r from-[#D4AF37] via-[#F3E5AB] to-[#AA7C11] bg-clip-text text-transparent">
-            Structured Clinical Output
-          </span>
-        </h1>
-        <p className="text-lg md:text-xl text-neutral-400 max-w-2xl mx-auto mb-10">
-          VUXO is a high-performance dictation and synthesis engine built for surgical operators and enterprise executives. Powered by real-time AI inference and studio-grade voice cloning.
-        </p>
-        <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
-          <button
-            onClick={() => setIsAuthModalOpen(true)}
-            className="w-full sm:w-auto inline-flex items-center justify-center space-x-2 bg-[#D4AF37] hover:bg-[#C59B27] text-black font-bold px-8 py-4 rounded-lg transition-all text-base shadow-[0_0_30px_rgba(212,175,55,0.3)]"
+        <motion.div
+          initial="hidden"
+          animate="visible"
+          transition={{ staggerChildren: 0.15 }}
+          className="flex flex-col items-center"
+        >
+          <motion.div
+            variants={fadeUp}
+            transition={{ duration: 0.6, ease: 'easeOut' }}
+            className="inline-flex items-center space-x-2 px-3 py-1 rounded-full bg-[#D4AF37]/10 border border-[#D4AF37]/30 text-[#D4AF37] text-xs font-medium mb-8"
           >
-            <span>Register Operator Account</span>
-            <ArrowRight className="w-5 h-5" />
-          </button>
-          <Link
-            href="/vuxo"
-            className="w-full sm:w-auto inline-flex items-center justify-center space-x-2 bg-white/5 hover:bg-white/10 border border-white/10 text-white font-medium px-8 py-4 rounded-lg transition-all text-base"
+            <Activity className="w-3.5 h-3.5" />
+            <span>Secure B2B Medical & Executive Infrastructure</span>
+          </motion.div>
+
+          <motion.h1
+            variants={fadeUp}
+            transition={{ duration: 0.6, ease: 'easeOut' }}
+            className="text-5xl md:text-7xl font-extrabold tracking-tight text-white mb-6 leading-tight"
           >
-            <span>Enter VUXO Terminal</span>
-          </Link>
-        </div>
+            Transform Spoken Expertise Into <br className="hidden md:block" />
+            <span className="bg-gradient-to-r from-[#D4AF37] via-[#F3E5AB] to-[#AA7C11] bg-clip-text text-transparent">
+              Structured Clinical Output
+            </span>
+          </motion.h1>
+
+          <motion.p
+            variants={fadeUp}
+            transition={{ duration: 0.6, ease: 'easeOut' }}
+            className="text-lg md:text-xl text-neutral-400 max-w-2xl mx-auto mb-10"
+          >
+            VUXO is a high-performance dictation and synthesis engine built for surgical operators and enterprise executives. Powered by real-time AI inference and studio-grade voice cloning.
+          </motion.p>
+
+          <motion.div
+            variants={fadeUp}
+            transition={{ duration: 0.6, ease: 'easeOut' }}
+            className="flex flex-col sm:flex-row items-center justify-center gap-4 w-full"
+          >
+            <button
+              onClick={() => setIsAuthModalOpen(true)}
+              className="w-full sm:w-auto inline-flex items-center justify-center space-x-2 bg-[#D4AF37] hover:bg-[#C59B27] text-black font-bold px-8 py-4 rounded-lg transition-all text-base shadow-[0_0_30px_rgba(212,175,55,0.3)] hover:scale-105"
+            >
+              <span>Register Operator Account</span>
+              <ArrowRight className="w-5 h-5" />
+            </button>
+            <Link
+              href="/vuxo"
+              className="w-full sm:w-auto inline-flex items-center justify-center space-x-2 bg-white/5 hover:bg-white/10 border border-white/10 text-white font-medium px-8 py-4 rounded-lg transition-all text-base hover:scale-105"
+            >
+              <span>Enter VUXO Terminal</span>
+            </Link>
+          </motion.div>
+        </motion.div>
       </section>
 
       {/* Tech Stack Banner */}
