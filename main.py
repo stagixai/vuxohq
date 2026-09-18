@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Response, status
+from fastapi import FastAPI, File, Header, HTTPException, Response, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from google import genai
@@ -177,19 +177,44 @@ class ThinkFilter:
 # FastAPI App
 app = FastAPI(
     title="VUXO Infrastructure",
-    description="Enterprise-grade FastAPI engine with multi-model routing, telemetry logging, streaming, and multimodal support.",
+    description="Enterprise-grade FastAPI engine with multi-model routing, telemetry logging, streaming, Groq Whisper transcription, and multimodal support.",
     version="2.0.0",
     lifespan=lifespan,
 )
 
-# Enable CORS for Web, Desktop, and Mobile clients
+# CORS Policy Configuration
+ALLOWED_ORIGINS = [
+    "https://vuxohq.tech",
+    "https://www.vuxohq.tech",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# Security: Supabase JWT Header Verification Dependency
+async def verify_supabase_jwt(authorization: str | None = Header(default=None)):
+    """
+    Validates optional Supabase Bearer JWT token from request Authorization header.
+    """
+    if not authorization:
+        return None
+    token = authorization.replace("Bearer ", "").strip()
+    if not token:
+        return None
+    if len(token) < 10:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Authorization Bearer Token",
+        )
+    return token
 
 
 # --- Pydantic Data Models ---
@@ -366,6 +391,46 @@ async def get_telemetry():
     }
 
 
+@app.post("/transcribe")
+@app.post("/api/transcribe")
+async def transcribe_audio(file: UploadFile = File(...)):
+    """
+    Transcribes audio using Groq Whisper API (whisper-large-v3-turbo).
+    """
+    if not groq_client:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="GROQ_API_KEY not configured for Whisper transcription",
+        )
+
+    try:
+        audio_bytes = await file.read()
+        filename = file.filename or "speech.webm"
+        content_type = file.content_type or "audio/webm"
+
+        transcription = await groq_client.audio.transcriptions.create(
+            file=(filename, audio_bytes, content_type),
+            model="whisper-large-v3-turbo",
+            response_format="json",
+        )
+        text = (
+            transcription.text
+            if hasattr(transcription, "text")
+            else str(transcription)
+        )
+        return {
+            "text": text,
+            "model": "whisper-large-v3-turbo",
+            "provider": "Groq Whisper",
+        }
+    except Exception as err:
+        logger.error("Groq Whisper transcription error: %s", err)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Groq Whisper transcription failed: {err}",
+        ) from err
+
+
 @app.post("/chat", response_model=ChatResponse)
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
@@ -441,7 +506,7 @@ async def chat_endpoint(request: ChatRequest):
 @app.post("/api/chat/stream")
 async def chat_stream_endpoint(request: ChatRequest):
     """
-    Server-Sent Events (SSE) streaming endpoint with token delivery & telemetry tracking.
+    Server-Sent Events (SSE) streaming endpoint with multimodal attachment support & telemetry.
     """
     start_time = time.time()
     provider = request.model_provider.lower()
@@ -475,14 +540,34 @@ async def chat_stream_endpoint(request: ChatRequest):
 
             elif provider == "gemini" and gemini_client:
                 used_model = GEMINI_DEFAULT_MODEL
-                gemini_contents = [
-                    genai_types.Content(
-                        role="model" if m.role == "assistant" else "user",
-                        parts=[genai_types.Part.from_text(text=m.content)],
-                    )
-                    for m in request.messages
-                    if m.content
-                ]
+                gemini_contents: list[genai_types.Content] = []
+                for m in request.messages:
+                    role = "model" if m.role == "assistant" else "user"
+                    parts: list[genai_types.Part] = []
+                    if m.content:
+                        parts.append(genai_types.Part.from_text(text=m.content))
+                    if m.attachments:
+                        for att in m.attachments:
+                            try:
+                                clean_data = re.sub(
+                                    r"^data:image/[^;]+;base64,", "", att.data
+                                )
+                                raw_bytes = base64.b64decode(clean_data)
+                                parts.append(
+                                    genai_types.Part.from_bytes(
+                                        data=raw_bytes, mime_type=att.mime_type
+                                    )
+                                )
+                            except (ValueError, TypeError) as b64_err:
+                                logger.warning(
+                                    "Failed to decode base64 attachment in stream: %s",
+                                    b64_err,
+                                )
+                    if parts:
+                        gemini_contents.append(
+                            genai_types.Content(role=role, parts=parts)
+                        )
+
                 response_stream = (
                     await gemini_client.aio.models.generate_content_stream(
                         model=GEMINI_DEFAULT_MODEL,

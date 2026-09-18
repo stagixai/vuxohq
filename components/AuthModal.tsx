@@ -2,6 +2,7 @@
 
 import React, { useState } from 'react';
 import { ShieldCheck, Mail, Lock, User, Briefcase, ArrowRight, CheckCircle, X } from 'lucide-react';
+import { supabase } from '@/lib/supabaseClient';
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -29,20 +30,43 @@ export default function AuthModal({ isOpen, onClose, onSuccess }: AuthModalProps
 
     try {
       if (mode === 'signup') {
-        // Simulating Supabase Auth Sign-Up with trigger mapping
-        setTimeout(() => {
-          setIsLoading(false);
-          setSuccessMsg('Account created & profile trigger registered! Check email for activation link.');
-          if (onSuccess) onSuccess({ email, full_name: fullName });
-        }, 1200);
+        const { data, error } = await supabase.auth.signUp({
+          email,
+          password,
+          options: {
+            data: {
+              full_name: fullName,
+              specialty: specialty,
+            },
+          },
+        });
+
+        if (error) throw error;
+
+        setIsLoading(false);
+        setSuccessMsg(
+          data.user?.identities?.length === 0
+            ? 'An account with this email already exists. Please sign in instead.'
+            : 'Verification link sent! Check your inbox to activate your VUXO operator identity.'
+        );
+        if (onSuccess && data.user) onSuccess({ email, full_name: fullName });
       } else {
-        // Simulating Supabase Auth Sign-In
-        setTimeout(() => {
-          setIsLoading(false);
-          setSuccessMsg('Successfully authenticated to VUXO Gateway.');
-          if (onSuccess) onSuccess({ email });
-          setTimeout(() => onClose(), 1000);
-        }, 1000);
+        const { data, error } = await supabase.auth.signInWithPassword({
+          email,
+          password,
+        });
+
+        if (error) throw error;
+
+        setIsLoading(false);
+        setSuccessMsg('Authenticated to VUXO Gateway successfully.');
+        if (onSuccess && data.user) {
+          onSuccess({
+            email,
+            full_name: (data.user.user_metadata?.full_name as string) || undefined,
+          });
+        }
+        setTimeout(() => onClose(), 1000);
       }
     } catch (err) {
       setIsLoading(false);
@@ -78,7 +102,11 @@ export default function AuthModal({ isOpen, onClose, onSuccess }: AuthModalProps
         {/* Tab Selector */}
         <div className="flex border-b border-white/10 mb-6 text-sm font-semibold">
           <button
-            onClick={() => setMode('signup')}
+            onClick={() => {
+              setMode('signup');
+              setErrorMsg('');
+              setSuccessMsg('');
+            }}
             className={`flex-1 pb-3 text-center border-b-2 transition-all ${
               mode === 'signup'
                 ? 'border-[#D4AF37] text-[#D4AF37]'
@@ -88,7 +116,11 @@ export default function AuthModal({ isOpen, onClose, onSuccess }: AuthModalProps
             Register Operator
           </button>
           <button
-            onClick={() => setMode('signin')}
+            onClick={() => {
+              setMode('signin');
+              setErrorMsg('');
+              setSuccessMsg('');
+            }}
             className={`flex-1 pb-3 text-center border-b-2 transition-all ${
               mode === 'signin'
                 ? 'border-[#D4AF37] text-[#D4AF37]'
@@ -193,7 +225,7 @@ export default function AuthModal({ isOpen, onClose, onSuccess }: AuthModalProps
         <div className="mt-6 pt-4 border-t border-white/10 flex items-center justify-between text-[11px] text-neutral-500">
           <span className="flex items-center space-x-1">
             <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-            <span>Supabase RLS Protected</span>
+            <span>Supabase Auth Integrated</span>
           </span>
           <span>vuxohq.tech</span>
         </div>

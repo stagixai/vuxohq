@@ -18,6 +18,7 @@ import {
   Trash2,
   Volume2,
   Loader2,
+  Square,
 } from 'lucide-react';
 
 interface Attachment {
@@ -48,11 +49,15 @@ export default function VuxoTerminalPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
   const [isDictating, setIsDictating] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
   const [attachment, setAttachment] = useState<{ name: string; data: string; mime_type: string } | null>(null);
 
   const [synthesizingIndex, setSynthesizingIndex] = useState<number | null>(null);
   const [playingIndex, setPlayingIndex] = useState<number | null>(null);
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -138,33 +143,66 @@ export default function VuxoTerminalPage() {
     }
   };
 
-  const toggleDictation = () => {
+  // Groq Whisper Microphone Dictation Pipeline
+  const toggleDictation = async () => {
     if (!isDictating) {
-      setIsDictating(true);
-      const SpeechRecognition =
-        (window as unknown as { SpeechRecognition?: typeof React.Component; webkitSpeechRecognition?: typeof React.Component }).SpeechRecognition ||
-        (window as unknown as { SpeechRecognition?: typeof React.Component; webkitSpeechRecognition?: typeof React.Component }).webkitSpeechRecognition;
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        audioChunksRef.current = [];
+        const mediaRecorder = new MediaRecorder(stream);
+        mediaRecorderRef.current = mediaRecorder;
 
-      if (SpeechRecognition) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const recognition = new (SpeechRecognition as any)();
-        recognition.continuous = false;
-        recognition.interimResults = false;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        recognition.onresult = (event: any) => {
-          const transcript = event.results[0][0].transcript;
-          setInput((prev) => (prev ? `${prev} ${transcript}` : transcript));
-          setIsDictating(false);
+        mediaRecorder.ondataavailable = (event) => {
+          if (event.data.size > 0) {
+            audioChunksRef.current.push(event.data);
+          }
         };
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        recognition.onerror = () => setIsDictating(false);
-        recognition.onend = () => setIsDictating(false);
-        recognition.start();
-      } else {
-        alert('Web Speech API dictation is not supported in this browser environment.');
+
+        mediaRecorder.onstop = async () => {
+          stream.getTracks().forEach((track) => track.stop());
+          const audioBlob = new Blob(audioChunksRef.current, { type: mediaRecorder.mimeType || 'audio/webm' });
+          if (audioBlob.size === 0) {
+            setIsDictating(false);
+            return;
+          }
+
+          setIsTranscribing(true);
+          try {
+            const formData = new FormData();
+            formData.append('file', audioBlob, 'dictation.webm');
+
+            const res = await fetch('/api/transcribe', {
+              method: 'POST',
+              body: formData,
+            });
+
+            if (!res.ok) {
+              const errJson = await res.json().catch(() => ({ detail: 'Transcription failed' }));
+              throw new Error(errJson.detail || `HTTP ${res.status}`);
+            }
+
+            const data = await res.json();
+            if (data.text) {
+              setInput((prev) => (prev ? `${prev} ${data.text}` : data.text));
+            }
+          } catch (err) {
+            alert(`Groq Whisper Dictation Error: ${err instanceof Error ? err.message : 'Transcription failed'}`);
+          } finally {
+            setIsTranscribing(false);
+            setIsDictating(false);
+          }
+        };
+
+        mediaRecorder.start(250);
+        setIsDictating(true);
+      } catch (err) {
+        alert(`Microphone access error: ${err instanceof Error ? err.message : 'Permission denied'}`);
         setIsDictating(false);
       }
     } else {
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        mediaRecorderRef.current.stop();
+      }
       setIsDictating(false);
     }
   };
@@ -324,7 +362,7 @@ export default function VuxoTerminalPage() {
                 <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
               </div>
               <p className="text-[10px] text-neutral-500 tracking-wider uppercase">
-                Enterprise Voice & Synthesis Gateway
+                Groq Whisper AI Dictation & Voice Synthesis Gateway
               </p>
             </div>
           </div>
@@ -548,14 +586,23 @@ export default function VuxoTerminalPage() {
             <button
               type="button"
               onClick={toggleDictation}
-              className={`p-2.5 transition-colors rounded-lg ${
+              disabled={isTranscribing}
+              className={`p-2.5 transition-colors rounded-lg flex items-center space-x-1 ${
                 isDictating
-                  ? 'bg-red-500/20 text-red-400 animate-pulse'
+                  ? 'bg-red-500/20 text-red-400 animate-pulse border border-red-500/40'
+                  : isTranscribing
+                  ? 'bg-[#D4AF37]/20 text-[#D4AF37]'
                   : 'text-neutral-400 hover:text-[#D4AF37] hover:bg-white/5'
               }`}
-              title="Voice Dictation"
+              title="Groq Whisper Dictation"
             >
-              <Mic className="w-5 h-5" />
+              {isTranscribing ? (
+                <Loader2 className="w-5 h-5 animate-spin text-[#D4AF37]" />
+              ) : isDictating ? (
+                <Square className="w-5 h-5 fill-red-400" />
+              ) : (
+                <Mic className="w-5 h-5" />
+              )}
             </button>
 
             <input
@@ -563,8 +610,10 @@ export default function VuxoTerminalPage() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               placeholder={
-                isDictating
-                  ? 'Listening for spoken dictation...'
+                isTranscribing
+                  ? 'Groq Whisper AI processing audio...'
+                  : isDictating
+                  ? 'Recording live audio... Click red button to finish & transcribe with Groq Whisper'
                   : 'Enter clinical dictation or prompt...'
               }
               className="flex-1 bg-transparent px-3 py-2 text-sm text-white placeholder-neutral-500 focus:outline-none"
