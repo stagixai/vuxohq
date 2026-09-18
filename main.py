@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, Header, HTTPException, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from google import genai
@@ -38,8 +38,9 @@ GROQ_DEFAULT_MODEL = "qwen/qwen3.6-27b"
 GEMINI_DEFAULT_MODEL = "gemini-3.6-flash"
 OPENAI_DEFAULT_MODEL = "gpt-4o-mini"
 
-# In-memory Telemetry Aggregator
+# In-memory Telemetry Aggregator & Rate Limit Cache
 telemetry_history: list[dict] = []
+rate_limit_cache: dict[str, list[float]] = {}
 
 
 async def log_synthesis_telemetry(
@@ -177,8 +178,8 @@ class ThinkFilter:
 # FastAPI App
 app = FastAPI(
     title="VUXO Infrastructure",
-    description="Enterprise-grade FastAPI engine with multi-model routing, telemetry logging, streaming, Groq Whisper transcription, and multimodal support.",
-    version="2.0.0",
+    description="Enterprise-grade FastAPI engine with multi-model routing, telemetry logging, streaming, Groq Whisper transcription, rate limiting, and multimodal support.",
+    version="2.1.0",
     lifespan=lifespan,
 )
 
@@ -197,6 +198,58 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# Rate Limiting & Cost Control Middleware
+async def check_rate_limit(
+    request: Request,
+    x_profile_id: str | None = Header(default=None),
+):
+    """
+    Sliding-window rate limiter (60 req/min).
+    Uses Upstash Redis if UPSTASH_REDIS_REST_URL is set, else graceful in-memory sliding window fallback.
+    """
+    client_identifier = (
+        x_profile_id or (request.client.host if request.client else "anonymous")
+    )
+    now = time.time()
+    window_seconds = 60
+    max_requests = 60
+
+    upstash_url = os.getenv("UPSTASH_REDIS_REST_URL")
+    upstash_token = os.getenv("UPSTASH_REDIS_REST_TOKEN")
+
+    if upstash_url and upstash_token:
+        try:
+            from upstash_redis import Redis
+
+            redis = Redis(url=upstash_url, token=upstash_token)
+            key = f"vuxo:ratelimit:{client_identifier}"
+            current = redis.incr(key)
+            if current == 1:
+                redis.expire(key, window_seconds)
+            if current > max_requests:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Rate limit exceeded. Maximum 60 requests per minute.",
+                )
+            return client_identifier
+        except HTTPException:
+            raise
+        except Exception as redis_err:
+            logger.warning("Upstash Redis skipped, using fallback: %s", redis_err)
+
+    # In-memory sliding window fallback
+    timestamps = rate_limit_cache.get(client_identifier, [])
+    timestamps = [t for t in timestamps if now - t < window_seconds]
+    if len(timestamps) >= max_requests:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Rate limit exceeded. Maximum 60 requests per minute.",
+        )
+    timestamps.append(now)
+    rate_limit_cache[client_identifier] = timestamps
+    return client_identifier
 
 
 # Security: Supabase JWT Header Verification Dependency
@@ -354,7 +407,7 @@ async def root():
     return {
         "status": "Online",
         "service": "VUXO Infrastructure",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "providers": {
             "groq": {
                 "model": GROQ_DEFAULT_MODEL,
@@ -399,11 +452,11 @@ async def get_telemetry():
     }
 
 
-@app.post("/transcribe")
-@app.post("/api/transcribe")
+@app.post("/transcribe", dependencies=[Depends(check_rate_limit)])
+@app.post("/api/transcribe", dependencies=[Depends(check_rate_limit)])
 async def transcribe_audio(request: TranscribeRequest):
     """
-    Transcribes base64 audio payload using Groq Whisper API (whisper-large-v3-turbo).
+    Transcribes base64 audio payload using Groq Whisper API (whisper-large-v3-turbo) with rate limiting.
     """
     start_time = time.time()
     if not groq_client:
@@ -447,8 +500,8 @@ async def transcribe_audio(request: TranscribeRequest):
         ) from err
 
 
-@app.post("/chat", response_model=ChatResponse)
-@app.post("/api/chat", response_model=ChatResponse)
+@app.post("/chat", response_model=ChatResponse, dependencies=[Depends(check_rate_limit)])
+@app.post("/api/chat", response_model=ChatResponse, dependencies=[Depends(check_rate_limit)])
 async def chat_endpoint(request: ChatRequest):
     """
     Main endpoint for routing requests with multimodal support, automatic failover, and telemetry.
@@ -518,8 +571,8 @@ async def chat_endpoint(request: ChatRequest):
         ) from exc
 
 
-@app.post("/chat/stream")
-@app.post("/api/chat/stream")
+@app.post("/chat/stream", dependencies=[Depends(check_rate_limit)])
+@app.post("/api/chat/stream", dependencies=[Depends(check_rate_limit)])
 async def chat_stream_endpoint(request: ChatRequest):
     """
     Server-Sent Events (SSE) streaming endpoint with multimodal attachment support & telemetry.
@@ -655,11 +708,11 @@ class TTSRequest(BaseModel):
     )
 
 
-@app.post("/tts")
-@app.post("/api/tts")
+@app.post("/tts", dependencies=[Depends(check_rate_limit)])
+@app.post("/api/tts", dependencies=[Depends(check_rate_limit)])
 async def text_to_speech_endpoint(request: TTSRequest):
     """
-    Synthesizes text into audio using ElevenLabs API with telemetry logging.
+    Synthesizes text into audio using ElevenLabs API with telemetry logging and rate limiting.
     """
     start_time = time.time()
     eleven_key = os.getenv("ELEVENLABS_API_KEY")

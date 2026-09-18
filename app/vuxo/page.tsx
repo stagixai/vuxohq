@@ -23,6 +23,71 @@ import {
 } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
 
+class StreamingAudioPlayer {
+  private audioContext: AudioContext | null = null;
+  private queue: ArrayBuffer[] = [];
+  private isPlaying = false;
+
+  constructor() {
+    if (typeof window !== 'undefined') {
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      if (AudioCtx) {
+        this.audioContext = new AudioCtx();
+      }
+    }
+  }
+
+  public async addChunk(base64Audio: string) {
+    const base64Data = base64Audio.split(',')[1] || base64Audio;
+    const binaryString = window.atob(base64Data);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+
+    this.queue.push(bytes.buffer);
+    if (!this.isPlaying) {
+      this.playNext();
+    }
+  }
+
+  private async playNext() {
+    if (this.queue.length === 0 || !this.audioContext) {
+      this.isPlaying = false;
+      return;
+    }
+
+    this.isPlaying = true;
+    const chunk = this.queue.shift()!;
+
+    try {
+      if (this.audioContext.state === 'suspended') {
+        await this.audioContext.resume();
+      }
+      const audioBuffer = await this.audioContext.decodeAudioData(chunk);
+      const source = this.audioContext.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(this.audioContext.destination);
+
+      source.onended = () => {
+        this.playNext();
+      };
+
+      source.start(0);
+    } catch (error) {
+      console.error('Audio decode error:', error);
+      this.playNext();
+    }
+  }
+
+  public clear() {
+    this.queue = [];
+    this.isPlaying = false;
+  }
+}
+
 interface Attachment {
   mime_type: string;
   data: string;
@@ -58,6 +123,7 @@ export default function VuxoTerminalPage() {
   const [synthesizingIndex, setSynthesizingIndex] = useState<number | null>(null);
   const [playingIndex, setPlayingIndex] = useState<number | null>(null);
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
+  const streamingAudioPlayerRef = useRef<StreamingAudioPlayer | null>(null);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -66,6 +132,8 @@ export default function VuxoTerminalPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    streamingAudioPlayerRef.current = new StreamingAudioPlayer();
+
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (session?.user) {
         setUserProfile({
@@ -131,6 +199,7 @@ export default function VuxoTerminalPage() {
 
     if (playingIndex === index) {
       setPlayingIndex(null);
+      if (streamingAudioPlayerRef.current) streamingAudioPlayerRef.current.clear();
       return;
     }
 
@@ -138,7 +207,10 @@ export default function VuxoTerminalPage() {
     try {
       const response = await fetch('/api/tts', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-profile-id': userProfile?.id || '',
+        },
         body: JSON.stringify({
           text,
           profile_id: userProfile?.id,
@@ -208,7 +280,10 @@ export default function VuxoTerminalPage() {
               try {
                 const res = await fetch('/api/transcribe', {
                   method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'x-profile-id': userProfile?.id || '',
+                  },
                   body: JSON.stringify({
                     audio_base64: base64Data,
                     filename: 'dictation.webm',
@@ -288,7 +363,10 @@ export default function VuxoTerminalPage() {
       if (isStreaming) {
         const response = await fetch('/api/chat/stream', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'x-profile-id': userProfile?.id || '',
+          },
           body: JSON.stringify({
             messages: newMessages.map((m) => ({
               role: m.role,
@@ -352,7 +430,10 @@ export default function VuxoTerminalPage() {
       } else {
         const response = await fetch('/api/chat', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'x-profile-id': userProfile?.id || '',
+          },
           body: JSON.stringify({
             messages: newMessages.map((m) => ({
               role: m.role,

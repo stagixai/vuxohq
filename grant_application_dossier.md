@@ -68,3 +68,11 @@ Founded by the engineering team at **Stagix AI**, full-stack AI infrastructure e
 │                 │ and execute third-party HIPAA / SOC2 compliance security audits.       │
 └─────────────────┴────────────────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## 4. Enterprise Compliance & Security Posture (HIPAA / SOC2)
+
+- **Zero-Trust Data Access**: Supabase Row-Level Security (RLS) policies (`auth.uid() = profile_id`) ensure strict tenant isolation. Operators can only query `ChatSession` and `SynthesisLog` records tied to their specific authenticated UUID.
+- **Data Retention & Right to be Forgotten**: Automated soft-delete policies (`deleted_at`) enforce a 90-day data retention window, aligning with HIPAA and GDPR data minimization principles.
+- **Auditability & Observability**: Every synthesis event logs the operator's `profile_id`, latency, character counts, model metadata, and anonymized request fingerprints, providing a complete, immutable audit trail for enterprise compliance reviews.
